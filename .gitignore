@@ -1,0 +1,17 @@
+# Secrets
+.env
+
+# Run output (screenshots, logs, extracted JSON)
+artifacts/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# OS
+Thumbs.db
+desktop.ini

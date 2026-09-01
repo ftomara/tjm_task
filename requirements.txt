@@ -1,0 +1,12 @@
+# --- Image -> structured data -------------------------------------------
+anthropic>=0.40.0          # vision extraction of the order image
+pillow>=10.0.0             # image load / upscale / crop before extraction
+pydantic>=2.6.0            # OrderDoc schema + validation
+
+# --- Windows UI Automation ----------------------------------------------
+pywinauto>=0.6.8           # UIA backend driver for Fakturama (Eclipse/SWT)
+comtypes>=1.2.0            # raw UIA access where pywinauto abstracts too far
+
+# --- Plumbing ------------------------------------------------------------
+python-dotenv>=1.0.0       # load ANTHROPIC_API_KEY from .env
+rich>=13.7.0               # readable run log in the terminal
