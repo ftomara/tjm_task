@@ -514,4 +514,202 @@ combination of state.
 
 ---
 
+## The very first click against a just-launched Fakturama can silently vanish
+
+**Symptom.** First real end-to-end run of the consolidated `fakturama-auto
+run` command (everything before this had been driven by hand, one page
+object at a time, always against an already-open, already-used Fakturama):
+against a freshly wiped database, started fresh via `--launch`, it failed on
+the very first UI action - `create_payment_method`'s click on "Create a new
+term of payment" - with `ControlNotFound: could not ground New Term of
+Payment editor content within 15s`. Re-running the exact same call by hand
+moments later, against the same now-slightly-warmed-up instance, worked
+immediately. A separate call in the same run, `window.maximize()`, had the
+same shape of failure: no exception, but `window.is_maximized()` came back
+`False` afterward and stayed `False`.
+
+**Root cause (inferred).** Every prior test this session - dozens of
+successful creates, saves, and dialog interactions - ran against a Fakturama
+that had already been open and interacted with for a while. This was the
+first time any code in this project acted on a Fakturama within moments of
+its own `Application.start()` returning. `FakturamaSession.launch()`'s
+readiness check (`main_window.wait("ready")`) confirms the shell window
+exists and responds, but evidently not that the specific editor/list
+machinery a given action needs has finished whatever Eclipse does lazily on
+first use (class loading, plugin activation) - a button can be found,
+report itself enabled and visible, and still not respond to a click yet.
+Both failures - a button click producing no tab, and a window-state call
+producing no state change - fit the same explanation: the very first
+interaction of a session can be silently absorbed by the app before it has
+truly finished settling, with no error surfaced anywhere to catch.
+
+**Fix.** Two changes, both "verify and retry the whole action," not just
+add a longer wait:
+
+- `app/base.py` gained `click_and_await_pane()`, used by every "open a new
+  X editor" factory (`open_new_order`, `open_new_debtor`,
+  `open_new_payment_term`, `open_terms_of_payment_list`,
+  `open_new_vat_rate`, `open_vats_list`, `open_new_product`). It retries the
+  *entire* click-and-wait cycle - re-finding the trigger control fresh each
+  attempt, not reusing the first lookup - because retrying only the click
+  keeps pressing the same reference that already proved unreliable once;
+  a fresh attempt after Eclipse has had another second to settle is what
+  actually recovers.
+- `flow/order_flow.py`'s window-maximise at the start of the run now checks
+  `is_maximized()` and retries up to five times with a short delay, instead
+  of calling `maximize()` once and trusting it.
+
+**Lesson.** A page object verified correct by hand, one call at a time
+against a warm app, is not the same claim as "correct in a cold-started,
+fully automated run" - the entire session's manual testing had never
+actually exercised the first few seconds after launch, because a human
+naturally leaves a gap between starting an app and clicking something in
+it. The fix generalizes past this one button: any "click and wait for a
+result" action in this codebase should assume its first attempt might be
+silently absorbed, especially when nothing else is known to have already
+"warmed up" that part of the app.
+
+---
+
+## Two percentage fields silently mismatched their own read-back - "0" vs "0%"
+
+**Symptom.** Later in the same first consolidated run, `zero_out_terms()`
+failed: `AutomationError: setting Cash discount field failed after 3
+attempts: Cash discount field: wrote '0' but the field reads '0%'`.
+
+**Root cause.** Same underlying story as the Order date field's
+reformat-on-input behaviour, discovered by the same mechanism: fixing
+`set_text()` to always drive real keystrokes (rather than the broken
+ValuePattern path) made previously-silent reformatting visible for the
+first time. Both `PaymentTermEditor`'s Cash discount and `ContactEditor`'s
+Discount are percentage fields that always display with a trailing '%';
+typing a bare '0' leaves the field showing '0%', which a literal-string
+comparison correctly flags as a mismatch. Neither call had ever been
+exercised end-to-end this session through the corrected write path before
+now - `set_discount_zero()`'s only earlier live use predates the
+ValuePattern fix, when the same widget's reformatting was itself being
+silently skipped, so the old "0" vs "0" comparison happened to pass for the
+wrong reason.
+
+**Fix.** Both call sites now type the literal `"0%"` instead of `"0"`,
+which round-trips exactly. (Unlike the date field, no custom `verify`
+callable was needed - the fix is simply typing what the field will
+actually display, since escaping `%` already works correctly.)
+
+**Lesson.** The ValuePattern fix didn't just correct a persistence bug - it
+retroactively invalidated every earlier "this passed verification" result
+for any field with reformat-on-input behaviour, because verification had
+never actually been exercised against the field's *real* behaviour until
+real keystrokes started triggering it. Worth treating any percentage/date/
+currency field's existing test coverage as unconfirmed until re-run through
+the corrected path, not just the specific field that happened to fail here.
+
+---
+
+## A wiped workspace has no default Shipping method - and Fakturama hard-stops on it
+
+**Symptom.** The first consolidated `fakturama-auto run` against a freshly
+wiped database got through creating the payment method, VAT rate, products,
+and Debtor, then hung inside `open_new_order()`'s retry loop. The actual
+cause only surfaced by reproducing it directly and dumping the tree: a
+modal `Error` dialog, title "Error", message *"No default value found for
+Shippings. Please set one from list!"*, with a single OK button - not a
+warning that can be dismissed and worked around, since the New Order editor
+never opens behind it at all.
+
+**Root cause.** A normal, pre-existing Fakturama workspace - which is what
+every manual test this session ran against, and the only kind of workspace
+this bug class could have escaped detection on - ships a standard "Free of
+shipping costs" Shipping record out of the box, visible as the Order
+editor's default Shipping dropdown value in every screenshot taken before
+this session's first from-scratch wipe. `rm -rf FData` removes that seeded
+default along with everything else, and unlike VATs (which keeps its
+built-in 0% "Tax-free" rate even after a wipe - confirmed live, it was
+present in every post-wipe VATs list this session), Shipping has no
+built-in fallback at all: zero Shipping records is a state opening a New
+Order cannot tolerate.
+
+**Fix.** Added `app/shipping_editor.py` (`ShippingEditor`,
+`create_default_shipping_method()`), mirroring the VAT/Product/Payment-term
+editors - create a zero-value shipping method, click "Set as standard",
+save. Wired into `flow/order_flow.py` as the very first piece of master
+data created, before the Debtor or Order, since it has to exist before
+`open_new_order()` is ever called for any reason.
+
+**Lesson.** Wiping the workspace to get a clean, reproducible starting
+point (this session's own explicit request) is not the same guarantee as
+"a normal Fakturama install's starting point" - some master data is
+seeded by the installer/first-run process, not created lazily by the app
+itself, and a fully-empty database can be in a state the app's own code
+doesn't handle gracefully (a hard Error dialog, not a warning). Every
+manual test this entire session ran against a workspace that had *already*
+been through this exact first-run seeding at some earlier point, which is
+exactly why this never surfaced until the first fully-from-scratch,
+fully-automated run.
+
+---
+
+## The address selector's search doesn't match the Alias field
+
+**Symptom.** `build_order`'s address-selection step chose the customer's
+alias as its search text (`"NORTHSTAR-BERLIN"`) and the "Select the
+address" dialog never produced a match - the search box accepted the text,
+but no row appeared, so the fallback double-click landed on empty grid
+space and the dialog never closed.
+
+**Root cause.** Confirmed by hand: searching the literal alias
+`"NORTHSTAR-BERLIN"` matches nothing, while searching `"Northstar"` (the
+company name) finds the row immediately. The dialog's search evidently
+matches against its visible columns (No. / First Name / Name / Company /
+ZIP / City) and not the Alias field, even though Alias is a real, unique,
+intentionally-searchable-sounding field elsewhere in the app (the
+Miscellaneous tab, the Debtors list). Nothing about the dialog's own UI
+suggests this - the search box carries no placeholder or column indicator
+- so the only way to know was to try it.
+
+**Fix.** `build_order`'s search-text priority is now company name first,
+then last name, with alias only as a last resort - i.e. the fields
+actually confirmed to be searched, ahead of the one confirmed not to be.
+
+**Lesson.** "This field is called Alias and behaves like an identifier
+elsewhere in the app" is not evidence it participates in a specific
+search box - each search surface in this app has its own, undocumented set
+of matched columns, and the only reliable way to know which is to test the
+literal value against it, not to reason from the field's name or its role
+elsewhere.
+
+---
+
+## `run_order_flow` read the Order's totals after navigating away from it
+
+**Symptom.** `ControlNotFound: could not ground running net/gross total
+field within 10s. Container held: <no descendants>` - `order_editor`'s own
+content pane apparently held nothing at all.
+
+**Root cause.** A same-session repeat of the tab-teardown behaviour
+documented earlier for `activate_tab()`, this time self-inflicted in new
+orchestration code rather than a page object: `run_order_flow` called
+`order_editor.read_totals()` *after* `invoice_editor.save()`, by which
+point the Invoice tab had been the active one for two whole steps
+(`create_followup_invoice()` and `mark_paid()`/`save()`). The Order's
+content pane, no longer the front tab, had already been torn from the
+tree - `order_editor` the Python object was still perfectly valid, but the
+live control its locators resolve against was gone.
+
+**Fix.** Reordered `run_order_flow` to read the Order's totals immediately
+after saving the Order, while it is still the active tab, *before* calling
+`create_followup_invoice()` - which is also the more natural place for it
+regardless, since those are the Order's own totals, not the Invoice's.
+
+**Lesson.** This project's own documented rule ("re-activate a tab before
+touching it, every time control has passed through another tab in
+between") applies just as much to a `Page` object already sitting in a
+local variable as to a fresh lookup by name - holding a reference to an
+editor object across a step that switches tabs is not the same as that
+editor's content still being reachable. Worth double-checking, in any new
+orchestration code, whether a later step revisits an earlier editor after
+something else has taken focus in between.
+
+---
+
 *(more entries added as they come up)*

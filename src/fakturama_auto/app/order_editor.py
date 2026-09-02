@@ -25,13 +25,12 @@ piece is tracked separately and is not yet implemented here.
 from __future__ import annotations
 
 from datetime import date as date_type
-from datetime import datetime
 from typing import Any
 
 from ..errors import ControlNotFound
 from ..uia.locator import Locator
-from ..uia.waits import retry
-from .base import Page
+from ..uia.waits import WaitTimeout, retry
+from .base import Page, date_verifier
 
 # -- header -------------------------------------------------------------
 
@@ -103,19 +102,21 @@ def open_new_order(session: Any) -> "OrderEditor":
     tab - from being mistaken for this one's content.
     """
     window = session.focus()
-    control = NEW_ORDER_BUTTON.find(window, timeout=10.0)
 
-    def _press() -> None:
+    def _open() -> Any:
+        control = NEW_ORDER_BUTTON.find(window, timeout=10.0)
         try:
             control.invoke()
         except Exception:  # noqa: BLE001 - not every SWT control exposes Invoke
             control.click_input()
+        return Locator(control_type="Pane", name="New Order").labelled(
+            "New Order editor content"
+        ).find(window, timeout=15.0)
 
-    retry(_press, attempts=3, description=f"clicking {NEW_ORDER_BUTTON.label}")
-
-    content = Locator(control_type="Pane", name="New Order").labelled(
-        "New Order editor content"
-    ).find(window, timeout=15.0)
+    # Retries the whole click-and-wait cycle, re-finding the button each
+    # time - see base.click_and_await_pane's docstring: the very first such
+    # action against a just-launched Fakturama can silently drop its click.
+    content = retry(_open, attempts=3, delay=1.0, description="opening 'New Order'")
     return OrderEditor(session, content)
 
 
@@ -131,20 +132,7 @@ class OrderEditor(Page):
 
     def set_date(self, value: date_type) -> None:
         field = self.field_after_label("Date", control_types=("Edit",))
-        # Fakturama accepts ISO text but redisplays it in a locale format
-        # ("2026-07-14" -> "Jul 14, 2026") once the real keystrokes that
-        # write it also trigger the field's own reformat-on-input behaviour
-        # - the same date, not a wrong write, so verification parses the
-        # read-back instead of comparing it as a literal string.
-        def _same_date(actual: str, _expected: str) -> bool:
-            for fmt in ("%b %d, %Y", "%Y-%m-%d", "%m/%d/%Y", "%d.%m.%Y"):
-                try:
-                    return datetime.strptime(actual.strip(), fmt).date() == value
-                except ValueError:
-                    continue
-            return False
-
-        self.set_text(field, value.isoformat(), verify=_same_date)
+        self.set_text(field, value.isoformat(), verify=date_verifier(value))
 
     def set_cust_ref(self, value: str) -> None:
         self.set_text(CUST_REF, value)
@@ -186,6 +174,45 @@ class OrderEditor(Page):
         icon = self._icon_after_label(ADDRESSES_LABEL, NEW_DEBTOR_ICON_INDEX)
         self.click(icon)
 
+    def select_address(self, search_text: str) -> None:
+        """Step 2.1-2.2: search the address selector and choose the match.
+
+        Confirmed live: typing text that matches exactly one row sometimes
+        auto-confirms and closes the dialog on its own (seen reliably for
+        the product selector on an exact SKU), and sometimes just filters
+        the grid without selecting anything (seen for a company-name
+        substring here) - this app is not consistent about it. Rather than
+        depend on which behaviour a given search text triggers, this waits
+        briefly for an auto-close and, failing that, double-clicks the sole
+        remaining row. The grid itself exposes no per-row identity to UIA
+        (the same opaque-table pattern as the Items grid), so the row is
+        reached by a coordinate offset from the dialog's own frame and the
+        search box's rectangle, both of which *are* grounded - not a fixed
+        screen coordinate.
+        """
+        self.open_address_selector()
+        dialog = self.session.dialog(r"^Select the address$", timeout=10.0)
+        search = Locator(control_type="Edit").labelled("address search box").find(
+            dialog, timeout=5.0
+        )
+        search.click_input()
+        search.type_keys(search_text, with_spaces=True, set_foreground=False)
+
+        try:
+            self.session.dialog_closed(r"^Select the address$", timeout=2.0)
+            return
+        except WaitTimeout:
+            pass
+
+        from pywinauto.mouse import double_click
+
+        dialog_rect = dialog.rectangle()
+        search_rect = search.rectangle()
+        row_x = dialog_rect.left + 60
+        row_y = search_rect.bottom + 45
+        double_click(coords=(row_x, row_y))
+        self.session.dialog_closed(r"^Select the address$", timeout=10.0)
+
     def invoice_address_text(self) -> str:
         """The read-only, formatted address block shown once a Debtor is selected."""
         tab = Locator(control_type="Tab", name="Invoice address").labelled(
@@ -209,6 +236,76 @@ class OrderEditor(Page):
         """Step 3.2: the upper icon beside Items. Opens 'Select a product'."""
         icon = self._icon_after_label(ITEMS_LABEL, PRODUCT_SELECTOR_ICON_INDEX)
         self.click(icon)
+
+    def add_item(self, sku: str) -> None:
+        """Step 3.2-3.3: add a line by SKU via the product selector's search.
+
+        Confirmed live: typing a SKU that matches exactly one product
+        auto-selects and closes the dialog on its own - no separate row
+        click or OK needed. If the dialog is still open after typing (no
+        match, or an ambiguous one), it is cancelled and the failure is
+        raised explicitly rather than left as a silently-empty Items row.
+        """
+        self.open_product_selector()
+        dialog = self.session.dialog(r"^Select a product$", timeout=10.0)
+        search = Locator(control_type="Edit").labelled("product search box").find(
+            dialog, timeout=5.0
+        )
+        search.click_input()
+        search.type_keys(sku, with_spaces=True, set_foreground=False)
+        try:
+            self.session.dialog_closed(r"^Select a product$", timeout=3.0)
+        except WaitTimeout as exc:
+            cancel = Locator(control_type="Button", name="Cancel").find(dialog, timeout=3.0)
+            cancel.click_input()
+            raise ControlNotFound(
+                f"no unique product match for SKU {sku!r} in the product selector"
+            ) from exc
+
+    # -- Items grid cell editing --------------------------------------------
+    #
+    # The Items table renders its own rows with no corresponding UIA nodes -
+    # confirmed live, dumping its container returns nothing but a
+    # scrollbar (see the module docstring). Cells are therefore reached by a
+    # coordinate offset from the one grounded anchor beside the grid (the
+    # "Items" label's own icon column), not by identity - the closest this
+    # specific, confirmed-opaque widget allows to the locator-based grounding
+    # used everywhere else in this codebase. The offsets are fixed pixel
+    # column widths on this widget (confirmed stable across window sizes,
+    # as long as the window is wide enough not to scroll the column out of
+    # view - callers should maximise the main window before editing Discount).
+
+    _ITEMS_ROW_HEIGHT = 25
+    _ITEMS_FIRST_ROW_OFFSET = 39
+    _ITEMS_QTY_COLUMN_OFFSET = 88
+    _ITEMS_DISCOUNT_COLUMN_OFFSET = 962
+
+    def _items_icon_column_rect(self) -> Any:
+        label = Locator(control_type="Text", name=ITEMS_LABEL).find(self.root, timeout=10.0)
+        return label.parent().rectangle()
+
+    def _edit_items_cell(self, row_index: int, column_offset: int, value: str) -> None:
+        from pywinauto.keyboard import send_keys
+        from pywinauto.mouse import double_click
+
+        from .base import escape_special_keys
+
+        rect = self._items_icon_column_rect()
+        x = rect.right + column_offset
+        y = rect.top + self._ITEMS_FIRST_ROW_OFFSET + self._ITEMS_ROW_HEIGHT * row_index
+        double_click(coords=(x, y))
+        send_keys("^a")
+        send_keys(escape_special_keys(value))
+        send_keys("{ENTER}")
+
+    def set_item_quantity(self, row_index: int, quantity: str) -> None:
+        """``row_index`` is 0-based (the first Items row is 0)."""
+        self._edit_items_cell(row_index, self._ITEMS_QTY_COLUMN_OFFSET, quantity)
+
+    def set_item_discount_percent(self, row_index: int, percent: str) -> None:
+        """Requires the main window to be wide enough to show the Discount
+        column without horizontal scrolling - see the class-level note above."""
+        self._edit_items_cell(row_index, self._ITEMS_DISCOUNT_COLUMN_OFFSET, percent)
 
     # -- follow-up / save --------------------------------------------------
 
@@ -236,11 +333,18 @@ class OrderEditor(Page):
         else:
             self.root.type_keys("^s", set_foreground=False)
 
-    def create_followup_invoice(self) -> None:
+    def create_followup_invoice(self) -> "InvoiceEditor":
         """Step 4.6: the Order's own follow-up action, not the toolbar Invoice button."""
+        from .invoice_editor import InvoiceEditor
+
         group = FOLLOWUP_GROUP.find(self.root, timeout=10.0)
         button = FOLLOWUP_INVOICE.find(group, timeout=10.0)
         self.click(button)
+
+        content = Locator(control_type="Pane", name="New Invoice").labelled(
+            "New Invoice editor content"
+        ).find(self.session.focus(), timeout=15.0)
+        return InvoiceEditor(self.session, content)
 
     # -- totals read-back (step 4.3) ---------------------------------------
 

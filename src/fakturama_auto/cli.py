@@ -2,6 +2,8 @@
 
     fakturama-auto extract            # image -> OrderDoc, validated and printed
     fakturama-auto extract --save-fixture
+    fakturama-auto run                # drive Fakturama end to end from a fixture
+    fakturama-auto run --launch       # ...and start Fakturama first if it isn't running
 """
 
 from __future__ import annotations
@@ -45,6 +47,31 @@ def main(argv: list[str] | None = None) -> int:
         help="Write the extraction to --fixture so later runs can replay it offline.",
     )
     extract_cmd.set_defaults(func=cmd_extract)
+
+    run_cmd = sub.add_parser(
+        "run", help="Drive Fakturama end to end: Order -> Invoice -> paid, and verify it."
+    )
+    run_cmd.add_argument(
+        "--image",
+        type=Path,
+        help="Extract live from this image via --provider instead of replaying --fixture. "
+        "Nothing is written to disk either way - the extraction goes straight into Fakturama.",
+    )
+    run_cmd.add_argument(
+        "--provider", choices=PROVIDERS, default="gemini", help="Extraction provider for --image."
+    )
+    run_cmd.add_argument(
+        "--fixture",
+        type=Path,
+        default=DEFAULT_FIXTURE,
+        help="Extraction fixture to replay when --image is not given.",
+    )
+    run_cmd.add_argument(
+        "--launch",
+        action="store_true",
+        help="Start Fakturama if it isn't already running (otherwise attach to it).",
+    )
+    run_cmd.set_defaults(func=cmd_run)
 
     dump_cmd = sub.add_parser(
         "dump-tree", help="Inspect the live UIA tree (use this before writing locators)."
@@ -106,6 +133,73 @@ def cmd_extract(args: argparse.Namespace) -> int:
         console.print(f"Wrote fixture [green]{args.fixture}[/]")
 
     return 0 if report.ok else 2
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    from .flow import run_order_flow
+    from .uia import FakturamaSession
+
+    settings = load_settings()
+
+    if args.image:
+        required_key = {"gemini": "GEMINI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}.get(
+            args.provider
+        )
+        have_key = {
+            "gemini": settings.gemini_api_key,
+            "anthropic": settings.anthropic_api_key,
+        }.get(args.provider)
+        if required_key and not have_key:
+            console.print(
+                f"[yellow]No {required_key} found.[/] Copy .env.example to .env and add a key."
+            )
+            return 1
+        extractor = build_extractor(args.provider, settings, args.fixture)
+        console.print(f"Extracting [cyan]{args.image}[/] via [cyan]{extractor.name}[/] ...")
+        doc = extractor.extract(args.image)
+
+        # A backup copy, not the trusted --fixture: this is one run's raw
+        # extraction, kept so a failure downstream (in Fakturama, not here)
+        # doesn't mean re-paying for the same API call to see it again.
+        backup = settings.run_dir / "extraction.json"
+        save(doc, backup)
+        console.print(f"Extraction saved to [green]{backup}[/] (for reference, not replayed).")
+    else:
+        from .extract import FixtureExtractor
+
+        doc = FixtureExtractor(args.fixture).extract(DEFAULT_ORDER_IMAGE)
+
+    report = validate(doc)
+    _render(doc)
+    console.print(
+        Panel(
+            report.render(),
+            title="Reconciliation" + ("" if report.ok else " - FAILED"),
+            border_style="green" if report.ok else "red",
+        )
+    )
+    if not report.ok:
+        console.print("[bold red]Refusing to drive Fakturama from an unreconciled order.[/]")
+        return 2
+
+    console.print(
+        f"{'Launching' if args.launch else 'Attaching to'} Fakturama ..."
+    )
+    session = FakturamaSession.launch(settings) if args.launch else FakturamaSession.attach(settings)
+
+    result = run_order_flow(session, doc)
+
+    summary = Table.grid(padding=(0, 2))
+    summary.add_column(style="dim")
+    summary.add_column()
+    summary.add_row("Order", result.order_number)
+    summary.add_row("Invoice", result.invoice_number)
+    summary.add_row("Net", result.net_total)
+    summary.add_row("VAT", result.vat_total)
+    summary.add_row("Total", result.gross_total)
+    summary.add_row("Paid", "yes" if result.invoice_paid else "no")
+    console.print(Panel(summary, title="Saved", border_style="green"))
+    return 0
 
 
 def cmd_dump_tree(args: argparse.Namespace) -> int:

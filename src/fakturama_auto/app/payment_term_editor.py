@@ -12,10 +12,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..errors import ControlNotFound
+from ..errors import ControlNotFound, ManualReviewRequired
 from ..uia.locator import Locator
-from ..uia.waits import retry
-from .base import Page
+from .base import Page, click_and_await_pane
 
 TERMS_OF_PAYMENT_LINK = Locator(control_type="Text", name="terms of payment").labelled(
     "left-panel terms of payment link"
@@ -36,37 +35,46 @@ CASH_DISCOUNT = Locator(control_type="Edit", name="Cash discount").labelled("Cas
 DISCOUNT_DAYS = Locator(control_type="Edit", name="Discount Days").labelled("Discount Days field")
 NET_DAYS = Locator(control_type="Edit", name="Net Days").labelled("Net Days field")
 
-#: Step 2.10.4's exact mapping.
+#: Fakturama's full payment-code vocabulary (confirmed live by dumping the
+#: dropdown's real options - each has a trailing space in the app itself,
+#: harmless since ``matches_text``/``select_combo`` compare whitespace-
+#: insensitively): 'In cash', 'Credit transfer', 'Debit transfer',
+#: 'Bank card', 'Direct debit', 'Credit card', 'Debit card',
+#: 'Standing agreement', 'SEPA credit transfer', 'SEPA direct debit',
+#: 'Online payment service', 'Mutually defined'.
+#:
+#: Step 2.10.4 gives one exact example ("Bank Transfer = Credit transfer");
+#: everything else here is this codebase's own best-effort mapping from a
+#: printed payment method to the closest of the twelve codes above, not a
+#: value confirmed against the brief. A method with no confident mapping
+#: raises :class:`~..errors.ManualReviewRequired` rather than guessing.
 PAYMENT_CODE_BY_METHOD = {
     "Bank Transfer": "Credit transfer",
+    "Wire Transfer": "Credit transfer",
+    "SEPA Credit Transfer": "SEPA credit transfer",
     "Credit Card": "Credit card",
+    "Corporate Card": "Credit card",
+    "Debit Card": "Debit card",
+    "Bank Card": "Bank card",
+    "Direct Debit": "Direct debit",
     "SEPA Direct Debit": "SEPA direct debit",
+    "Cash": "In cash",
+    "Standing Order": "Standing agreement",
+    "PayPal": "Online payment service",
+    "Online Payment": "Online payment service",
 }
 
 
 def open_terms_of_payment_list(session: Any) -> Any:
     """Step 2.10.1: opens the terms-of-payment list as a tab, alongside whatever else is open."""
     window = session.focus()
-    link = TERMS_OF_PAYMENT_LINK.find(window, timeout=10.0)
-    retry(
-        lambda: link.click_input(),
-        attempts=3,
-        description=f"clicking {TERMS_OF_PAYMENT_LINK.label}",
-    )
-    return Locator(control_type="Pane", name="terms of payment").labelled(
-        "terms of payment list content"
-    ).find(window, timeout=15.0)
+    return click_and_await_pane(window, TERMS_OF_PAYMENT_LINK, "terms of payment")
 
 
 def open_new_payment_term(session: Any) -> "PaymentTermEditor":
     """Step 2.10.2: the green + control in the terms-of-payment list."""
     window = session.focus()
-    button = CREATE_BUTTON.find(window, timeout=10.0)
-    retry(lambda: button.click_input(), attempts=3, description=f"clicking {CREATE_BUTTON.label}")
-
-    content = Locator(control_type="Pane", name="New Term of Payment").labelled(
-        "New Term of Payment editor content"
-    ).find(window, timeout=15.0)
+    content = click_and_await_pane(window, CREATE_BUTTON, "New Term of Payment")
     return PaymentTermEditor(session, content)
 
 
@@ -82,15 +90,23 @@ class PaymentTermEditor(Page):
         """Step 2.10.4: map the extracted method to Fakturama's payment-code list."""
         code = PAYMENT_CODE_BY_METHOD.get(method)
         if code is None:
-            raise ControlNotFound(
-                f"no known payment-code mapping for {method!r}; expected one of "
-                f"{sorted(PAYMENT_CODE_BY_METHOD)}"
+            raise ManualReviewRequired(
+                "no known payment-code mapping for this method",
+                method=method,
+                known_methods=sorted(PAYMENT_CODE_BY_METHOD),
             )
         self.select_combo(PAYMENT_CODE, code)
 
     def zero_out_terms(self) -> None:
-        """Step 2.10.5: Cash discount, Discount Days and Net Days all to 0."""
-        self.set_text(CASH_DISCOUNT, "0")
+        """Step 2.10.5: Cash discount, Discount Days and Net Days all to 0.
+
+        Cash discount is a percentage field that always displays with a
+        trailing '%' - typing the literal '0%' (not a bare '0') is what
+        actually round-trips, the same reformat-on-input behaviour the
+        Order date field has. Discount/Net Days are plain day counts, no
+        such suffix.
+        """
+        self.set_text(CASH_DISCOUNT, "0%")
         self.set_text(DISCOUNT_DAYS, "0")
         self.set_text(NET_DAYS, "0")
 

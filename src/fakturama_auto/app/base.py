@@ -16,7 +16,9 @@ resized, themed, or re-laid-out, which a coordinate offset does not.
 
 from __future__ import annotations
 
-from typing import Any
+from datetime import date as date_type
+from datetime import datetime
+from typing import Any, Callable
 
 from ..errors import AutomationError, ControlNotFound
 from ..uia.locator import Locator, describe_children, describe_element, matches_text
@@ -220,6 +222,39 @@ class Page:
         )[0]
 
 
+def click_and_await_pane(
+    window: Any,
+    trigger: Locator,
+    pane_name: str,
+    *,
+    trigger_timeout: float = 10.0,
+    pane_timeout: float = 15.0,
+    attempts: int = 3,
+) -> Any:
+    """Click ``trigger`` and wait for the editor Pane it opens.
+
+    Every "New Order" / "New Debtor" / "Create a new X" action in this app
+    follows this exact shape, and retries the *whole* click-and-wait cycle,
+    not just the click. Confirmed live: the very first such action against a
+    just-launched Fakturama can silently drop its click - no exception, no
+    resulting tab, and no amount of waiting afterward recovers it - while
+    the identical action against an already-warm instance works first try.
+    Retrying only the click would keep pressing the same already-resolved
+    button reference; re-finding ``trigger`` from scratch on each attempt is
+    what actually recovers, since by the second attempt the app has finished
+    whatever startup work made the first click land nowhere.
+    """
+
+    def _press_and_wait() -> Any:
+        control = trigger.find(window, timeout=trigger_timeout)
+        control.click_input()
+        return Locator(control_type="Pane", name=pane_name).labelled(
+            f"{pane_name!r} editor content"
+        ).find(window, timeout=pane_timeout)
+
+    return retry(_press_and_wait, attempts=attempts, delay=1.0, description=f"opening {pane_name!r}")
+
+
 # --------------------------------------------------------------------------
 # Low-level helpers
 # --------------------------------------------------------------------------
@@ -308,7 +343,7 @@ def _value_of(control: Any) -> str:
 _SPECIAL_KEYS = "+^%~(){}"
 
 
-def _escape_special_keys(value: str) -> str:
+def escape_special_keys(value: str) -> str:
     return "".join(f"{{{ch}}}" if ch in _SPECIAL_KEYS else ch for ch in value)
 
 
@@ -320,7 +355,7 @@ def _type_into(control: Any, value: str) -> None:
     # characters are escaped first so a literal '%', '+', etc. in the value
     # types as itself instead of being read as a modifier/grouping key.
     control.type_keys(
-        _escape_special_keys(value), with_spaces=True, with_newlines=False, set_foreground=False
+        escape_special_keys(value), with_spaces=True, with_newlines=False, set_foreground=False
     )
 
 
@@ -332,3 +367,25 @@ def _is_checked(control: Any) -> bool:
             return bool(control.is_checked())
         except Exception:  # noqa: BLE001
             return False
+
+
+def date_verifier(target: date_type) -> Callable[[str, str], bool]:
+    """A ``set_text`` ``verify`` callable for date fields.
+
+    Fakturama accepts ISO text but redisplays it in a locale format
+    ("2026-07-14" -> "Jul 14, 2026") once real keystrokes trigger the
+    field's own reformat-on-input behaviour - the same date, not a wrong
+    write - so this parses the read-back instead of comparing it as a
+    literal string. Shared by the Order and Invoice date fields, which hit
+    the exact same widget behaviour.
+    """
+
+    def _same_date(actual: str, _expected: str) -> bool:
+        for fmt in ("%b %d, %Y", "%Y-%m-%d", "%m/%d/%Y", "%d.%m.%Y"):
+            try:
+                return datetime.strptime(actual.strip(), fmt).date() == target
+            except ValueError:
+                continue
+        return False
+
+    return _same_date

@@ -21,8 +21,7 @@ from typing import Any
 
 from ..errors import ControlNotFound
 from ..uia.locator import Locator
-from ..uia.waits import retry
-from .base import Page
+from .base import Page, click_and_await_pane
 
 # -- header -----------------------------------------------------------
 
@@ -66,16 +65,7 @@ def open_new_debtor(session: Any) -> "ContactEditor":
     grounded by ``control_type="Pane"`` specifically, not just by name.
     """
     window = session.focus()
-    link = NEW_CONTACT_LINK.find(window, timeout=10.0)
-
-    def _press() -> None:
-        link.click_input()
-
-    retry(_press, attempts=3, description=f"clicking {NEW_CONTACT_LINK.label}")
-
-    content = Locator(control_type="Pane", name="New Debtor").labelled(
-        "New Debtor editor content"
-    ).find(window, timeout=15.0)
+    content = click_and_await_pane(window, NEW_CONTACT_LINK, "New Debtor")
     return ContactEditor(session, content)
 
 
@@ -104,6 +94,14 @@ class ContactEditor(Page):
 
     def open_main_address_tab(self) -> None:
         Locator(control_type="TabItem", name="Addresses").find(self.root, timeout=10.0).click_input()
+
+    def open_address_subtab(self, name: str) -> None:
+        """Activate one of the inner address tabs, e.g. ``"Main address"`` or
+        ``"additional address #1"`` (the latter appears only after
+        :meth:`add_address_tab`). Same tab-teardown rule as everywhere else
+        in this app: the other sub-tab's fields are not in the tree until
+        this is called."""
+        Locator(control_type="TabItem", name=name).find(self.root, timeout=10.0).click_input()
 
     def set_main_address(
         self,
@@ -197,7 +195,10 @@ class ContactEditor(Page):
         self.set_text(ALIAS_NAME, alias)
 
     def set_discount_zero(self) -> None:
-        self.set_text(DISCOUNT, "0")
+        """Discount is a percentage field that always displays with a
+        trailing '%' - typing the literal '0%' is what round-trips, same as
+        PaymentTermEditor's Cash discount field."""
+        self.set_text(DISCOUNT, "0%")
 
     def set_net_or_gross(self, mode: str) -> None:
         self.select_combo(NET_OR_GROSS, mode)

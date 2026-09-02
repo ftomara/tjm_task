@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import re
 
-from fakturama_auto.app.base import Page, _escape_special_keys, _ordered_descendants, _value_of
+from fakturama_auto.app.base import Page, escape_special_keys, _ordered_descendants, _value_of
 
 
 class FakeInfo:
@@ -188,7 +188,7 @@ class FakeEditControl:
         else:
             # mirrors real pywinauto: a single char wrapped in braces types
             # as that literal character instead of being read as modifier
-            # syntax - the same unescaping _escape_special_keys relies on.
+            # syntax - the same unescaping escape_special_keys relies on.
             self._text += re.sub(r"\{(.)\}", r"\1", value)
 
     def window_text(self) -> str:
@@ -212,9 +212,9 @@ def test_escape_special_keys_protects_pywinauto_modifier_syntax():
     """Confirmed live: typing 'VAT 19%' landed as 'VAT 19' - pywinauto's
     type_keys() reads a bare '%' as a dangling Alt-modifier prefix, not a
     literal character. Same risk for +^~(){}."""
-    assert _escape_special_keys("VAT 19%") == "VAT 19{%}"
-    assert _escape_special_keys("A+B^C~D(E){F}") == "A{+}B{^}C{~}D{(}E{)}{{}F{}}"
-    assert _escape_special_keys("plain text") == "plain text"
+    assert escape_special_keys("VAT 19%") == "VAT 19{%}"
+    assert escape_special_keys("A+B^C~D(E){F}") == "A{+}B{^}C{~}D{(}E{)}{{}F{}}"
+    assert escape_special_keys("plain text") == "plain text"
 
 
 def test_set_text_escapes_percent_so_it_is_not_swallowed():
