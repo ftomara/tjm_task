@@ -4,6 +4,12 @@
 # Run output (screenshots, logs, extracted JSON)
 artifacts/
 
+# Fakturama's own workspace/database, if launched with a workspace inside
+# this repo (e.g. a folder named FData next to this file). Live app state,
+# not project source - never commit it.
+FData/
+*/FData/
+
 # Python
 .venv/
 __pycache__/

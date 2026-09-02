@@ -112,28 +112,57 @@ class Locator:
             yield from fallback._ladder()
 
     def _criteria(self) -> dict[str, Any]:
-        """Translate to pywinauto's search kwargs."""
+        """Translate the control_type filter to pywinauto's native search kwargs.
+
+        Only ``control_type`` - see ``_match()`` for why every other filter
+        (``name``, ``name_re``, ``automation_id``, ``class_name``) is
+        deliberately matched in Python instead of pushed down here.
+        """
         criteria: dict[str, Any] = {}
         if self.control_type:
             criteria["control_type"] = self.control_type
-        if self.name is not None:
-            criteria["title"] = self.name
-        if self.name_re is not None:
-            criteria["title_re"] = self.name_re
-        if self.automation_id is not None:
-            criteria["auto_id"] = self.automation_id
-        if self.class_name is not None:
-            criteria["class_name"] = self.class_name
         return criteria
 
     def _match(self, parent: Any) -> list[Any]:
+        """Resolve matches: control_type pushed to pywinauto, everything else in Python.
+
+        Confirmed live, two separate times, that this pywinauto/backend
+        combination raises ``TypeError`` for kwargs the docs suggest it
+        should support: first ``title_re`` (name_re), then ``auto_id``
+        (automation_id) - each on a call that otherwise succeeds fine for
+        ``control_type`` alone. Rather than accumulate a kwarg-by-kwarg
+        allowlist as each one is discovered broken, every filter except
+        ``control_type`` is matched here, in Python, against one fetch -
+        this makes the exact same guarantee for all of them at once and
+        removes the version dependency entirely, rather than betting that
+        `class_name` (the one filter not yet proven broken) happens to work.
+
+        A ``TypeError`` from the one kwarg still pushed down means the
+        locator itself is malformed and is re-raised rather than swallowed
+        - see the module docstring's fuller explanation of why that
+        distinction matters. The broad tree-mutation case below (a dialog
+        opening mid-walk surfaces as a transient COM error) is still
+        treated as "not yet", because that one genuinely resolves on the
+        next poll; a TypeError never will.
+        """
         search = parent.children if self.scope == "children" else parent.descendants
         try:
-            return list(search(**self._criteria()))
+            candidates = list(search(**self._criteria()))
+        except TypeError:
+            raise
         except Exception:
-            # A tree that mutates mid-walk (very common in SWT while a dialog
-            # is opening) surfaces as COM errors. Treat it as "not yet".
             return []
+
+        if self.name is not None:
+            candidates = [c for c in candidates if matches_text(_name_of(c), self.name)]
+        if self.name_re is not None:
+            pattern = re.compile(self.name_re)
+            candidates = [c for c in candidates if pattern.match(_name_of(c) or "")]
+        if self.automation_id is not None:
+            candidates = [c for c in candidates if _automation_id_of(c) == self.automation_id]
+        if self.class_name is not None:
+            candidates = [c for c in candidates if _class_name_of(c) == self.class_name]
+        return candidates
 
     @property
     def label(self) -> str:
@@ -198,6 +227,28 @@ def describe_element(element: Any) -> str:
         return " ".join(parts)
     except Exception as exc:  # pragma: no cover - depends on live UI
         return f"<unreadable element: {exc}>"
+
+
+def _name_of(element: Any) -> str | None:
+    """The accessible name used for Python-side name/name_re filtering."""
+    try:
+        return element.element_info.name
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _automation_id_of(element: Any) -> str | None:
+    try:
+        return element.element_info.automation_id
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _class_name_of(element: Any) -> str | None:
+    try:
+        return element.element_info.class_name
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def matches_text(actual: str | None, expected: str) -> bool:

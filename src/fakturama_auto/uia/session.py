@@ -9,13 +9,14 @@ leave orphaned processes holding the database.
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from ..config import Settings
 from ..errors import AutomationError, ControlNotFound
-from .locator import describe_children
+from .locator import Locator, describe_children
 from .waits import wait_until
 
 #: The shell's window title varies by version and by which editor is focused,
@@ -136,12 +137,35 @@ class FakturamaSession:
     def dialog(self, title_re: str, timeout: float = 20.0) -> Any:
         """Wait for a modal dialog and return it.
 
-        Dialogs are looked up as top-level windows of the same process rather
-        than as descendants of the shell, because SWT reparents them.
+        Two genuinely different mechanisms have each been confirmed live for
+        different dialogs on this app, and neither covers both cases:
+
+        * The main shell window itself is only reliably found via
+          ``self._app.window(...)`` (an ``Application`` scoped at
+          ``attach()`` time) - a plain ``Desktop`` lookup for it also works.
+        * The 'Select the address' dialog, despite rendering as a fully
+          independent floating window with its own titlebar, does **not**
+          show up in ``Desktop(backend="uia").windows()`` at all - it only
+          appears as a ``Window``-typed descendant of the main shell. SWT
+          apparently reparents at least some of its dialogs into the shell's
+          own accessibility subtree rather than registering them as
+          Desktop-level top-level windows.
+
+        Rather than guess which any given dialog will be, this tries both
+        rungs on every poll and returns whichever answers first.
         """
+        from pywinauto import Desktop
+
+        pattern = re.compile(title_re, re.IGNORECASE)
+
         def _find() -> Any:
-            window = self._app.window(title_re=title_re, top_level_only=True)
-            return window if window.exists() else None
+            for window in Desktop(backend="uia").windows():
+                if window.is_visible() and pattern.match(window.element_info.name or ""):
+                    return window
+            for window in self.main_window.descendants(control_type="Window"):
+                if pattern.match(window.element_info.name or ""):
+                    return window
+            return None
 
         try:
             return wait_until(_find, timeout=timeout, description=f"dialog matching {title_re!r}")
@@ -152,12 +176,57 @@ class FakturamaSession:
             ) from exc
 
     def dialog_closed(self, title_re: str, timeout: float = 20.0) -> None:
-        """Wait for a dialog to disappear (i.e. the click actually took)."""
+        """Wait for a dialog to disappear (i.e. the click actually took).
+
+        Checks both rungs :meth:`dialog` does, for the same reason.
+        """
+        from pywinauto import Desktop
+
+        pattern = re.compile(title_re, re.IGNORECASE)
+
+        def _still_open() -> bool:
+            for window in Desktop(backend="uia").windows():
+                if window.is_visible() and pattern.match(window.element_info.name or ""):
+                    return True
+            for window in self.main_window.descendants(control_type="Window"):
+                if pattern.match(window.element_info.name or ""):
+                    return True
+            return False
+
         wait_until(
-            lambda: not self._app.window(title_re=title_re, top_level_only=True).exists(),
+            lambda: not _still_open(),
             timeout=timeout,
             description=f"dialog matching {title_re!r} to close",
         )
+
+    def activate_tab(self, content_pane_name: str, timeout: float = 15.0) -> Any:
+        """Bring a previously-opened editor tab to the front and return its content.
+
+        Confirmed live, and expensive to learn the hard way: an editor
+        tab's own content is torn down from the UIA tree **entirely**
+        while a different tab is focused - not merely hidden. A script
+        that opens 'New Order', then does other work in a second tab, then
+        tries to re-resolve the Order's content pane by name alone will get
+        ``ControlNotFound`` even though the tab is still open and its data
+        is intact; the content simply does not exist in the tree until its
+        tab is the active one again. Every page object that outlives a
+        single focused moment needs this, not just a bare name lookup.
+
+        The tab's own title may carry Fakturama's unsaved-changes ``*``
+        prefix (``*New Debtor`` vs. ``New Debtor``) depending on whether
+        anything has been typed into it yet, so the TabItem is matched
+        loosely on that while the returned content pane is still looked up
+        by the exact, unprefixed name - confirmed live that the content
+        pane itself is never prefixed, only the tab header is.
+        """
+        window = self.focus()
+        tab_item = Locator(
+            control_type="TabItem", name_re=rf"^\*?{re.escape(content_pane_name)}$"
+        ).labelled(f"{content_pane_name!r} tab header").find(window, timeout=timeout)
+        tab_item.click_input()
+        return Locator(control_type="Pane", name=content_pane_name).labelled(
+            f"{content_pane_name!r} editor content"
+        ).find(window, timeout=timeout)
 
     # -- evidence ----------------------------------------------------------
 

@@ -19,8 +19,13 @@ from __future__ import annotations
 from typing import Any
 
 from ..errors import AutomationError, ControlNotFound
-from ..uia.locator import Locator, describe_children, matches_text
+from ..uia.locator import Locator, describe_children, describe_element, matches_text
 from ..uia.waits import retry, wait_until
+
+# Every write/click/select method below accepts either a Locator (resolved
+# against self.root) or an already-resolved element - the latter is what
+# field_after_label() returns, and forcing a caller to wrap it back in a
+# Locator just to act on it would be pure ceremony. See _resolve().
 
 #: Control types SWT uses for editable single-line fields.
 EDITABLE_TYPES = ("Edit", "ComboBox", "Document")
@@ -38,35 +43,55 @@ class Page:
 
     # -- reading -----------------------------------------------------------
 
-    def read_text(self, locator: Locator, timeout: float = 10.0) -> str:
-        control = locator.find(self.root, timeout=timeout)
+    def read_text(self, target: Any, timeout: float = 10.0) -> str:
+        control, _ = self._resolve(target, timeout)
         return _value_of(control)
 
     # -- writing -----------------------------------------------------------
 
-    def set_text(self, locator: Locator, value: str, timeout: float = 10.0) -> None:
+    def set_text(
+        self,
+        target: Any,
+        value: str,
+        timeout: float = 10.0,
+        verify: Any = None,
+    ) -> None:
         """Type ``value`` into a field and assert it landed.
 
-        Tries the UIA ValuePattern first because it is atomic and immune to
-        keyboard focus races. Falls back to select-all-and-type for widgets
-        that expose no settable value - a real case in SWT.
+        Always drives this through real keystrokes (``_type_into``), never
+        through the UIA ValuePattern (``set_edit_text``). Confirmed live,
+        the hard way: ValuePattern.SetValue updates this app's Edit widgets
+        visually - the widget reads back correctly forever, including
+        immediately after a save - while silently never reaching the
+        underlying SWT/JFace model, because it bypasses the native
+        keystroke pipeline those bindings listen on (Modify/FocusOut
+        events). A field written this way looks completely correct in
+        every read-back check and is dropped the moment the app restarts.
+        Real typed keystrokes fire those events as they land, the same way
+        a user's typing does, and that is what this app's data-binding
+        actually observes.
+
+        ``verify`` overrides the default exact-text check (``matches_text``)
+        for fields that legitimately reformat what was typed - the date
+        field takes ISO text and redisplays it as ``"Jul 14, 2026"``, which
+        is the same date, not a wrong write. Pass a ``(actual, value) ->
+        bool`` callable for those cases instead of loosening the default for
+        everyone.
         """
-        control = locator.find(self.root, timeout=timeout)
+        control, label = self._resolve(target, timeout)
+        check = verify or matches_text
 
         def _write() -> None:
-            if not _try_value_pattern(control, value):
-                _type_into(control, value)
+            _type_into(control, value)
             actual = _value_of(control)
-            if not matches_text(actual, value):
-                raise AutomationError(
-                    f"{locator.label}: wrote {value!r} but the field reads {actual!r}"
-                )
+            if not check(actual, value):
+                raise AutomationError(f"{label}: wrote {value!r} but the field reads {actual!r}")
 
-        retry(_write, attempts=3, description=f"setting {locator.label}")
+        retry(_write, attempts=3, description=f"setting {label}")
 
-    def click(self, locator: Locator, timeout: float = 10.0) -> Any:
+    def click(self, target: Any, timeout: float = 10.0) -> Any:
         """Click a control, preferring the Invoke pattern over a synthetic mouse click."""
-        control = locator.find(self.root, timeout=timeout)
+        control, label = self._resolve(target, timeout)
 
         def _press() -> Any:
             try:
@@ -75,11 +100,11 @@ class Page:
                 control.click_input()
             return control
 
-        return retry(_press, attempts=3, description=f"clicking {locator.label}")
+        return retry(_press, attempts=3, description=f"clicking {label}")
 
-    def set_checkbox(self, locator: Locator, checked: bool, timeout: float = 10.0) -> None:
+    def set_checkbox(self, target: Any, checked: bool, timeout: float = 10.0) -> None:
         """Drive a checkbox to a desired state and verify it."""
-        control = locator.find(self.root, timeout=timeout)
+        control, label = self._resolve(target, timeout)
 
         def _apply() -> None:
             if _is_checked(control) != checked:
@@ -88,15 +113,13 @@ class Page:
                 except Exception:  # noqa: BLE001
                     control.click_input()
             if _is_checked(control) != checked:
-                raise AutomationError(
-                    f"{locator.label}: could not set checked={checked}"
-                )
+                raise AutomationError(f"{label}: could not set checked={checked}")
 
-        retry(_apply, attempts=3, description=f"toggling {locator.label}")
+        retry(_apply, attempts=3, description=f"toggling {label}")
 
-    def select_combo(self, locator: Locator, value: str, timeout: float = 10.0) -> None:
+    def select_combo(self, target: Any, value: str, timeout: float = 10.0) -> None:
         """Choose an entry in a dropdown by its visible text, and verify it."""
-        control = locator.find(self.root, timeout=timeout)
+        control, label = self._resolve(target, timeout)
 
         def _apply() -> None:
             try:
@@ -108,19 +131,40 @@ class Page:
             actual = _value_of(control)
             if not matches_text(actual, value):
                 raise AutomationError(
-                    f"{locator.label}: selected {value!r} but it reads {actual!r}. "
-                    f"Available: {self.combo_options(locator)}"
+                    f"{label}: selected {value!r} but it reads {actual!r}. "
+                    f"Available: {self.combo_options(control)}"
                 )
 
-        retry(_apply, attempts=3, description=f"selecting {value!r} in {locator.label}")
+        retry(_apply, attempts=3, description=f"selecting {value!r} in {label}")
 
-    def combo_options(self, locator: Locator, timeout: float = 10.0) -> list[str]:
-        """Visible entries of a dropdown - used to explain a failed selection."""
-        control = locator.find(self.root, timeout=timeout)
+    def combo_options(self, target: Any, timeout: float = 10.0) -> list[str]:
+        """The real selectable entries of a dropdown - used to explain a failed selection.
+
+        A collapsed combo's ``.texts()`` does not enumerate its options on
+        this app (confirmed live: it returns the combo's own name twice plus
+        the dropdown toggle button's name - never the actual list). The list
+        only exists once the dropdown is open, as ``ListItem`` children, so
+        this expands it, reads those, and collapses it again rather than
+        leaving the UI in a state this call didn't ask for.
+        """
+        control, _ = self._resolve(target, timeout)
         try:
-            return [t for t in control.texts() if t]
+            control.expand()
+            items = [item.window_text() for item in Locator(control_type="ListItem").find_all(control)]
+            return [i for i in items if i]
         except Exception:  # noqa: BLE001
             return []
+        finally:
+            try:
+                control.collapse()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _resolve(self, target: Any, timeout: float) -> tuple[Any, str]:
+        """Accept either a Locator (resolved against self.root) or an already-found element."""
+        if isinstance(target, Locator):
+            return target.find(self.root, timeout=timeout), target.label
+        return target, describe_element(target)
 
     # -- structural grounding ---------------------------------------------
 
@@ -189,15 +233,58 @@ def _info(element: Any) -> Any | None:
 
 
 def _ordered_descendants(root: Any) -> list[Any]:
-    """Descendants in UIA tree order, which mirrors SWT's widget creation order."""
+    """Descendants in depth-first document order.
+
+    Deliberately NOT pywinauto's own ``.descendants()``: confirmed live on
+    this SWT tree that it does not preserve document order the way an
+    explicit ``.children()`` walk does - a search for "the first ComboBox
+    after the Date label" returned an unrelated combo reading "Close",
+    which is exactly what the window's own system menu (Restore / Move /
+    Size / ... / Close) would produce if a raw-view walk surfaces it.
+    ``uia.dump.dump_tree`` uses this same recursive ``.children()`` walk and
+    its output has been checked by hand against the live app, so this
+    mirrors the one traversal already known to match what is on screen.
+    """
+    ordered: list[Any] = []
+
+    def _walk(element: Any) -> None:
+        try:
+            children = list(element.children())
+        except Exception:  # noqa: BLE001
+            return
+        for child in children:
+            ordered.append(child)
+            _walk(child)
+
     try:
-        return list(root.descendants())
+        _walk(root)
     except Exception:  # noqa: BLE001
-        return []
+        pass
+    return ordered
 
 
 def _value_of(control: Any) -> str:
-    """Best-effort read of a control's current text."""
+    """Best-effort read of a control's current text.
+
+    ComboBox needs its own first move. Checked live on this app: its
+    ``get_value()`` doesn't exist (pywinauto's ``ComboBoxWrapper`` never
+    defines it); ``window_text()`` returns the combo's own accessible NAME,
+    not its selection ("With VAT" reads back as "VAT"); and ``.texts()``'s
+    last entry is the dropdown toggle button's own accessible name ("Close")
+    on every combo checked, not a real option. All three are individually
+    plausible and all three are wrong. ``.selected_text()`` is the pywinauto
+    API built for exactly this and reads correctly, so it goes first
+    whenever the control exposes it.
+    """
+    selected_text = getattr(control, "selected_text", None)
+    if callable(selected_text):
+        try:
+            value = selected_text()
+            if value:
+                return str(value)
+        except Exception:  # noqa: BLE001
+            pass
+
     for reader in (
         lambda: control.get_value(),
         lambda: control.window_text(),
@@ -212,22 +299,29 @@ def _value_of(control: Any) -> str:
     return ""
 
 
-def _try_value_pattern(control: Any, value: str) -> bool:
-    """Set a control's value atomically. Returns False if unsupported."""
-    try:
-        control.set_edit_text(value)
-        return True
-    except Exception:  # noqa: BLE001
-        return False
+#: pywinauto's type_keys() reads these as modifier/grouping syntax
+#: (``%`` = Alt, ``^`` = Ctrl, ``+`` = Shift, ``~`` = Enter, ``()``/``{}`` for
+#: grouping) rather than literal characters. Confirmed live: typing the VAT
+#: rate name "VAT 19%" landed as "VAT 19" - the trailing '%' was consumed as
+#: a dangling Alt-modifier prefix and never appeared. Every one of these
+#: needs the same brace-escape pywinauto documents for sending them as text.
+_SPECIAL_KEYS = "+^%~(){}"
+
+
+def _escape_special_keys(value: str) -> str:
+    return "".join(f"{{{ch}}}" if ch in _SPECIAL_KEYS else ch for ch in value)
 
 
 def _type_into(control: Any, value: str) -> None:
-    """Focus, clear, and type - the fallback when ValuePattern is unavailable."""
+    """Focus, clear, and type - real keystrokes, not the UIA ValuePattern."""
     control.click_input()
     control.type_keys("^a{DEL}", set_foreground=False)
-    # with_spaces keeps multi-word values intact; braces in the text would
-    # otherwise be read as pywinauto key codes.
-    control.type_keys(value, with_spaces=True, with_newlines=False, set_foreground=False)
+    # with_spaces keeps multi-word values intact; special pywinauto syntax
+    # characters are escaped first so a literal '%', '+', etc. in the value
+    # types as itself instead of being read as a modifier/grouping key.
+    control.type_keys(
+        _escape_special_keys(value), with_spaces=True, with_newlines=False, set_foreground=False
+    )
 
 
 def _is_checked(control: Any) -> bool:
