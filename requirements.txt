@@ -1,6 +1,7 @@
 # --- Image -> structured data -------------------------------------------
-anthropic>=0.40.0          # vision extraction of the order image
-pillow>=10.0.0             # image load / upscale / crop before extraction
+google-genai>=1.0.0        # default vision provider
+anthropic>=0.40.0          # alternative vision provider
+pillow>=10.0.0             # image load / upscale before extraction
 pydantic>=2.6.0            # OrderDoc schema + validation
 
 # --- Windows UI Automation ----------------------------------------------

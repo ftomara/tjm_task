@@ -34,7 +34,7 @@ def main(argv: list[str] | None = None) -> int:
         "--image", type=Path, default=DEFAULT_ORDER_IMAGE, help="Source order image."
     )
     extract_cmd.add_argument(
-        "--provider", choices=PROVIDERS, default="llm_vision", help="Extraction provider."
+        "--provider", choices=PROVIDERS, default="gemini", help="Extraction provider."
     )
     extract_cmd.add_argument(
         "--fixture", type=Path, default=DEFAULT_FIXTURE, help="Fixture path to read or write."
@@ -72,9 +72,13 @@ def main(argv: list[str] | None = None) -> int:
 def cmd_extract(args: argparse.Namespace) -> int:
     settings = load_settings()
 
-    if args.provider == "llm_vision" and not settings.anthropic_api_key:
+    required_key = {"gemini": "GEMINI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}.get(args.provider)
+    have_key = {"gemini": settings.gemini_api_key, "anthropic": settings.anthropic_api_key}.get(
+        args.provider
+    )
+    if required_key and not have_key:
         console.print(
-            "[yellow]No ANTHROPIC_API_KEY found.[/] Copy .env.example to .env and add a key, "
+            f"[yellow]No {required_key} found.[/] Copy .env.example to .env and add a key, "
             "or use --provider fixture."
         )
 

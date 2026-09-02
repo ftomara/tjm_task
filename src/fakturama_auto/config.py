@@ -24,6 +24,8 @@ MAX_IMAGE_LONG_EDGE = 1568
 
 @dataclass(frozen=True)
 class Settings:
+    gemini_api_key: str | None
+    gemini_model: str
     anthropic_api_key: str | None
     model: str
     fakturama_exe: Path | None
@@ -46,6 +48,8 @@ def load_settings(run_id: str | None = None) -> Settings:
 
     exe = os.environ.get("FAKTURAMA_EXE")
     return Settings(
+        gemini_api_key=os.environ.get("GEMINI_API_KEY"),
+        gemini_model=os.environ.get("GEMINI_MODEL", "gemini-3.7-flash"),
         anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"),
         model=os.environ.get("FAKTURAMA_AUTO_MODEL", "claude-opus-5"),
         fakturama_exe=Path(exe) if exe else None,
