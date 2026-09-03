@@ -1,14 +1,15 @@
 """The 'New Shipping' editor, and the list it's created from.
 
 Grounded live. Discovered the hard way, not from the brief: opening a New
-Order looks up a *default* Shipping method, and if none is marked standard,
-fails outright with a modal Error dialog ("No default value found for
-Shippings. Please set one from list!") - not a warning that can be
-dismissed and worked around, a hard stop before the Order editor even
-opens. A normal Fakturama install ships a standard "Free of shipping costs"
-entry out of the box (seen in every manual test this project ran against a
-pre-existing workspace); a wiped/fresh database has no Shipping records at
-all, so this has to be created before the first Order ever opens.
+Order on a wiped workspace (no Shipping records at all) shows a modal
+Error dialog ("No default value found for Shippings. Please set one from
+list!") - but confirmed live, the Order editor still opens behind it; only
+its own Shipping field is left blank (see OrderEditor.open_new_order()).
+A normal Fakturama install ships a standard "Free of shipping costs" entry
+out of the box (seen in every manual test this project ran against a
+pre-existing workspace), which is why this recreates that exact name -
+so this is created lazily, whenever the Order's own Shipping field
+actually needs a value, not unconditionally up front.
 """
 
 from __future__ import annotations
@@ -76,10 +77,9 @@ class ShippingEditor(Page):
 def create_default_shipping_method(session: Any, name: str = "Free of shipping costs") -> None:
     """Create a zero-cost shipping method and mark it standard.
 
-    Needed once per workspace, before the first Order ever opens - see the
-    module docstring for why. ``name`` matches the built-in method's own
-    name so an Order created against this fresh workspace looks identical
-    to one created against a normal, pre-seeded Fakturama install.
+    ``name`` matches the built-in method's own name so an Order filled in
+    on this fresh workspace looks identical to one created against a
+    normal, pre-seeded Fakturama install.
     """
     editor = open_new_shipping(session)
     editor.set_name(name)

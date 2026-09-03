@@ -348,9 +348,23 @@ def escape_special_keys(value: str) -> str:
 
 
 def _type_into(control: Any, value: str) -> None:
-    """Focus, clear, and type - real keystrokes, not the UIA ValuePattern."""
+    """Focus, clear, and type - real keystrokes, not the UIA ValuePattern.
+
+    Confirmed live: on a freshly-opened editor - especially right after a
+    multi-step recovery sequence (open, hit an error, fix it, reopen) - the
+    clear keystroke can race with the control still settling and not fully
+    take. What gets typed next then lands next to whatever survived the
+    clear rather than into a truly empty field, interleaving into
+    plausible-looking garbage ("2026-07-14" read back as "Jul 14, 714").
+    Verifying the clear actually landed, and retrying it if not, is cheap
+    insurance against typing into a field that only looked empty.
+    """
     control.click_input()
     control.type_keys("^a{DEL}", set_foreground=False)
+    for _ in range(3):
+        if not _value_of(control):
+            break
+        control.type_keys("^a{DEL}", set_foreground=False)
     # with_spaces keeps multi-word values intact; special pywinauto syntax
     # characters are escaped first so a literal '%', '+', etc. in the value
     # types as itself instead of being read as a modifier/grouping key.

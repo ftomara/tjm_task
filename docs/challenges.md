@@ -712,4 +712,306 @@ something else has taken focus in between.
 
 ---
 
+## Switching the flow to lazy, order-first master data resurfaced the stale-combo bug in a new shape
+
+**Symptom.** Restructuring the flow to match `docs/design.md`'s intended
+shape - open the Order first, resolve the Debtor/Product/VAT through its
+own selectors, create master data only on a genuine miss - meant the
+Debtor's Payment combo could now be found empty *after* the Debtor editor
+had already opened (the term genuinely doesn't exist yet). The first fix
+tried was: save the Debtor without a payment method, create the term
+standalone, then reopen a fresh editor instance to pick it up. That save
+failed outright: Fakturama's own Error Log panel (a real Eclipse view,
+not a modal dialog - a different error surface than any seen so far this
+session) showed "Document number invalid in: com.s..." and "Failed to
+persist contents of part (cc...", and the tab never lost its unsaved `*`
+prefix.
+
+**Root cause.** A Debtor cannot be saved at all with no payment method
+selected - not "saved with a blank field," an outright persistence
+failure. The reopen-by-search workaround this first fix relied on
+therefore had nothing to reopen: the Debtor was never actually persisted,
+so searching the Debtors list for it correctly found no match, and the
+whole thing failed with a confusing "no new Debtor tab appeared" error
+that was really just a downstream symptom of the real failure two steps
+earlier.
+
+**Fix.** Never save an incomplete Debtor in the first place. `create_debtor`
+now fills a Debtor editor via a shared `_fill_new_debtor()` helper without
+touching Payment; if the method isn't available on that editor's combo,
+the in-progress tab is simply abandoned - it was never saved, so there is
+nothing to lose or clean up, the same "leave a harmless unsaved tab open"
+call already made for the stray blank Order tab earlier in this project -
+the payment term is created standalone, and `_fill_new_debtor()` runs a
+*second* time from scratch on a brand-new editor instance, which enumerates
+the now-existing term correctly. Only that second, complete instance is
+ever saved.
+
+**Lesson.** The two ways to dodge the stale-combo bug are "never let the
+combo render before the data exists" (this project's original fix) and
+"never keep the stale instance around at all, start over instead of
+patching it" (this fix) - reaching for the first one (save-then-reopen)
+without checking whether the intermediate state is even valid produces a
+second, harder-to-read failure downstream instead of the one actually
+being worked around. Worth checking whether an intermediate state a
+workaround depends on (here: "a saved-but-incomplete Debtor exists to be
+reopened") is actually reachable before building the rest of the
+workaround on top of it.
+
+---
+
+## `add_item`'s "unique match auto-closes" assumption was based on one success, not a rule
+
+**Symptom.** `ManualReviewRequired: Product was created but still not found
+in the product selector (sku='CHR-ERG-01')` - even though the product had
+genuinely just been created and saved correctly. Reproduced directly:
+searching "CHR-ERG-01" in the product selector shows exactly one matching
+row, with the right name, price and VAT - and the dialog just sits there,
+not closed, not selected.
+
+**Root cause.** `add_item()`'s docstring claimed a SKU matching exactly one
+product "auto-selects and closes the dialog on its own - no separate row
+click or OK needed," and only handled that path, cancelling and reporting
+"not found" the moment it didn't happen. That claim was true for the one
+case it was ever tested against (`EXEC-TASK-01`, back when all master data
+was created upfront) and false here - the same inconsistency
+`select_address()` had already documented for the *address* selector
+("this app is not consistent about it") turns out to apply to the
+*product* selector too, and `add_item()` was never updated to match
+because its one successful run made the auto-close look like a rule
+instead of a coincidence.
+
+**Fix.** Gave `add_item()` the same two-rung approach `select_address()`
+already uses: wait briefly for an auto-close, and if that doesn't happen,
+double-click the sole remaining row (reached by the same
+grounded-frame-and-search-box coordinate offset, since the product
+selector shares the address selector's opaque-grid structure). Only
+cancels and reports not-found if neither rung closes the dialog.
+
+**Lesson.** "It worked the one time I tried it" is not the same claim as
+"this is the dialog's behaviour" - especially for a UI already confirmed,
+in a sibling dialog, to be inconsistent about the exact same kind of
+interaction. Two page objects implementing what looks like the identical
+pattern (search box + auto-select-on-unique-match) are worth checking
+against each other once one of them turns out to be flaky, rather than
+assuming the untested one is fine because its happy path was seen once.
+
+---
+
+## A Ctrl+S on the still-open Debtor refreshes its stale Payment combo - found by the user, not guessed at
+
+**Symptom.** The previous fix for the missing-payment-term case (abandon
+the in-progress Debtor editor, create the term, fill a second fresh
+instance from scratch) worked but was wasteful - every field typed twice
+whenever the term happened to be missing.
+
+**What actually works, confirmed live by hand.** After creating the
+payment term standalone and returning to the *same still-open* Debtor tab
+(no reopening, no second editor), pressing Ctrl+S on it does two things at
+once: it refreshes that tab's Payment combo to include the just-created
+term, and it saves cleanly - no error, even though Payment is still unset
+at the moment the keystroke is sent. Verified independently after a full
+app relaunch: Company and every other field came back correctly from
+disk, confirming this Ctrl+S save is a real, complete persist, not a
+partial or cosmetic one.
+
+**Why this doesn't contradict the earlier "saving with no payment method
+fails outright" finding.** That failure (Fakturama's own Error Log:
+"Document number invalid" / "Failed to persist contents of part") happened
+when *no payment term existed anywhere in the workspace yet* - a
+first-save attempt made before the term was ever created. Here, the term
+already exists in the system by the time Ctrl+S is pressed; this specific
+record just hasn't referenced one yet. Those are different states that
+happen to look identical from this function's own point of view (a Debtor
+with Payment blank, about to be saved) - what actually matters is whether
+a valid payment term exists *anywhere*, not whether this record points at
+one.
+
+**Fix.** `create_debtor()` now: fills the Debtor, and if the target
+payment method isn't yet an option, creates the term and sends a bare
+Ctrl+S to the same still-open editor - no abandoning, no second fill.
+`_fill_new_debtor()`'s dual-instance path is gone; there is only ever one
+Debtor editor per customer now.
+
+**Lesson.** The first fix that avoids a known bug (staleness) isn't
+necessarily the cheapest one - "never let the combo render before the
+data exists" and "abandon and start over" were the two options considered
+at the time, and a third, better one (an explicit save/refresh action on
+the same instance) was sitting in the app the whole time, just untested.
+Worth trying the "is there an in-app refresh for this" question directly -
+by hand, live - before settling for the workaround that only needed
+knowledge already in hand to build.
+
+---
+
+## The product/address selector icon's click can also be silently dropped
+
+**Symptom.** `ControlNotFound: dialog matching '^Select a product$' did
+not appear within 10s` - on a run where nothing else was unusual; the
+Order and everything before it had resolved correctly.
+
+**Root cause.** The same cold-start click-drop already fixed for the
+"open a new editor" buttons (`click_and_await_pane`) turns out not to be
+specific to those buttons - `select_address()` and `add_item()` each did a
+single, unretried `open_address_selector()`/`open_product_selector()`
+click before waiting up to 10s for their dialog, with nothing to recover
+if that click landed nowhere.
+
+**Fix.** Added `OrderEditor._open_dialog_via_icon()`, the same
+retry-the-whole-cycle shape as `click_and_await_pane`: re-run the opener
+(which re-finds and re-clicks the icon fresh) and re-wait for the dialog,
+up to three attempts, rather than retrying a bare click against an
+already-resolved reference. Both `select_address()` and `add_item()` now
+go through it.
+
+**Lesson.** A fix scoped to "this button" when the real cause is "any
+click, right after certain kinds of busy sequences, can land nowhere"
+will keep resurfacing on the next button that hits the same window of
+flakiness. Once a class of bug has one confirmed instance, it is worth
+checking every structurally-similar call site rather than waiting for
+each one to fail on its own.
+
+---
+
+## Clicking Order while Shipping is missing opens a real tab; the Error dialog just hides it - two fix attempts before landing on this
+
+**Symptom.** A full run reported success end to end - but the user,
+watching it live, spotted a second, unsaved `*New Order` tab sitting next
+to the real, saved `PO000001`. The *saved* order had also somehow ended up
+in "Gross" price mode despite the flow explicitly calling
+`set_price_mode("Net")`, which had genuinely succeeded (verified) against
+whichever Order tab was active at the time.
+
+**Root cause.** Clicking Order while no default Shipping exists does not
+fail to open the New Order tab - it opens it, and shows the modal Error
+dialog on top. Confirmed live, and it is the same rule already documented
+elsewhere in this project for inactive tabs and `ExpandableComposite`
+sections: content sitting behind an open modal dialog is torn from the UIA
+tree while that dialog is up, not merely hidden. So `open_new_order()`'s
+`Locator(control_type="Pane", name="New Order").find(...)` genuinely finds
+nothing for as long as the dialog is open - not because the tab failed to
+open, but because its content isn't in the tree yet from this call's point
+of view.
+
+**Two wrong fixes before this one.** First attempt: wrap `open_new_order()`
+in a try/except that dismisses the dialog and retries on failure - but
+`open_new_order()` already retries its own click-and-wait cycle three
+times internally *before* that outer exception is ever raised, so each
+internal retry clicked Order again while the dialog was still up, each
+time opening a *second, separate, genuine* Order tab (not a hidden one -
+an actually new one). Second attempt, reasoning "don't retry a click while
+the dialog might be open, but do click once more right after dismissing
+it" - still wrong, for the same underlying misunderstanding: since the
+first click's tab already exists and just needs the dialog gone to
+reappear, that deliberate second click *also* opened a genuine second
+Order every single time this path fired, which is not a rare edge case on
+a wiped workspace - it is the common case. Later, `_resolve_debtor()`'s
+`session.activate_tab("New Order")` - a name-based lookup that can't tell
+two same-named tabs apart - could then resolve to whichever duplicate,
+not necessarily the one carrying `set_price_mode("Net")` and everything
+else already applied to it; the rest of the flow continued on that wrong
+tab, still reconciling correctly (its items were entered correctly) while
+silently defaulting to Fakturama's own "Gross" mode.
+
+**Fix.** `open_new_order()` now clicks Order exactly once on the common
+path: if the Shipping error appears, it is only *dismissed* - no default
+Shipping method is created here at all - and the *same* click's tab is
+simply waited for again, no second click. Creating the default Shipping
+method moved out of this function entirely; the Order's own Shipping field
+is simply left blank until the flow actually reaches it (see the next
+entry), since nothing about opening the Order itself needs it. A second
+click only happens via the function's own light retry wrapper, as a last
+resort if the Pane still isn't found for an unrelated reason.
+
+**Lesson.** The "content behind a modal is torn from the tree, not hidden"
+rule this project already knew from two other contexts didn't get applied
+here on the first two attempts, because the symptom (`ControlNotFound`,
+tab never appears) looked identical to the unrelated "click was silently
+dropped" cold-start bug already fixed elsewhere - and the fix that's
+right for a dropped click (click again) is exactly wrong for a click that
+succeeded but is temporarily undetectable. Two fixes were shipped and
+verified-by-elimination wrong before checking which of those two
+different-cause, same-symptom bugs this actually was.
+
+---
+
+## Generalising the Ctrl+S refresh to the Order's Shipping field - and a deliberate non-fix for Product's VAT combo
+
+**Context.** Once the Debtor's Payment combo staleness was fixed by a
+Ctrl+S on the still-open editor (see the earlier entry crediting that
+discovery), the Order's own Shipping field turned out to be exactly the
+same shape of bug: left blank after `open_new_order()` stopped creating a
+default Shipping method inline (previous entry), so if the flow later
+needs a value there, creating the method while the same Order tab has
+been open the whole time would leave its Shipping combo stale, same as
+Payment.
+
+**Fix (Shipping).** Follows the identical shape as `create_debtor()`: fill
+the Order's items first, check whether the Shipping combo already has the
+target method, and if not, create it standalone, reactivate the same
+still-open Order tab, send a bare Ctrl+S to refresh the combo in place,
+verify it now has the option, then select it and do the real save.
+
+**A related idea, tried and then deliberately reverted (Product's VAT).**
+`create_product()`'s VAT combo has the identical shape - the original
+version requires the caller (`run_order_flow`) to pre-create the VAT rate
+before ever calling `create_product()`, a rule enforced by convention
+rather than by the function itself. It was rewritten once to be
+self-contained the same way as Shipping (create the rate lazily, refresh
+via Ctrl+S) - and then reverted back to the caller-pre-creates version on
+explicit instruction, because the brief itself specifies checking the VAT
+list and creating the rate there first, before the Product that
+references it - not discovering the gap from inside an already-open
+Product editor. Recorded here so the reasoning survives even though the
+code doesn't currently reflect it: this is a case where a locally cleaner,
+more self-contained design lost to a more literal reading of the brief's
+own specified sequence, not to a bug in the self-contained version.
+
+**Lesson.** Once a fix for one bug class is confirmed working, the next
+question is "what else has this exact shape" - but "the same shape" isn't
+always "the same right fix." Two things can look identical from the stale-
+combo-bug's point of view (Shipping and VAT both being a combo inside an
+editor that might already be open) while the brief has an explicit opinion
+about one of them and not the other.
+
+---
+
+## The left panel's "New product" link silently does nothing - a real Fakturama bug, not a timing issue
+
+**Symptom.** `AutomationError: opening 'New product' failed after 3
+attempts: could not ground 'New product' editor content within 15s` -
+reproduced on a completely fresh Fakturama launch, then again after
+closing and relaunching a second time. Directly clicking the "New
+product" link and screenshotting immediately after showed no change at
+all: no new tab, no dialog, no error, nothing - the click registers
+(confirmed enabled, confirmed clicked) and simply has no effect.
+
+**Root cause.** Unlike every other cold-start click issue this session,
+this did not recover with time, a fresh relaunch, or more retries - ruling
+out a timing/session-state explanation. But the *list* view for the same
+data behaves fine: clicking "Products" (the left panel's **Data** section
+link, not "New product" under **New**) opens the Products list correctly,
+and that list's own toolbar has a working "Create a new product" button -
+the exact same list-plus-its-own-create-button shape already relied on
+for VATs, Shippings and terms of payment. So the left panel's standalone
+"New product" shortcut appears to be a genuine, narrow Fakturama bug
+specific to that one link, not something this project's automation is
+doing wrong.
+
+**Fix.** `open_new_product()` now goes through the Products list and its
+"Create a new product" button (`open_products_list()` then the
+`CREATE_BUTTON` locator), matching the pattern already used for
+`VatEditor`/`ShippingEditor`/`PaymentTermEditor`, instead of the
+"New product" left-panel link.
+
+**Lesson.** Not every `ControlNotFound` after a click is this project's
+own bug or a timing quirk - some are the target application's. The
+diagnostic step that actually settled it was checking whether a
+*different, structurally similar* action (the Products list's own create
+button) worked where the suspect one didn't, rather than continuing to
+adjust retry counts and delays around a click that was never going to
+succeed no matter how long it waited.
+
+---
+
 *(more entries added as they come up)*

@@ -1,12 +1,39 @@
-"""The full image-to-cash flow: master data, Order, Invoice, payment.
+"""The full image-to-cash flow: Order-first, master data created lazily.
 
-Order of operations matters and is deliberate: every piece of master data a
-later step depends on (the payment method, each VAT rate, each product) is
-created *before* the editor that consumes it is opened. That specifically
-avoids the stale-combo-box bug in docs/challenges.md - a combo already open
-when its backing list changes elsewhere keeps showing the old options until
-its editor is closed and reopened, so the fix is to never let that ordering
-happen in the first place.
+Matches docs/design.md's intended shape: the Order opens first and stays
+open for the run; the Debtor and every Product are resolved through the
+Order's own selectors, and a piece of master data is only ever created on a
+genuine miss - never speculatively upfront. The default Shipping method is
+the one exception handled differently: opening a New Order on a wiped
+workspace shows a modal Error dialog rather than failing to open at all
+(see ``OrderEditor.open_new_order()``), so it isn't created until the
+Order's own Shipping field is actually being filled in, later in this
+function, rather than up front.
+
+The risk this design has to manage, documented at length in
+docs/challenges.md, is the stale-combo-box bug: a combo already rendered in
+an already-open editor does not see data created elsewhere while it stays
+open. Every lazy branch below is written to avoid ever hitting that:
+
+- The address selector and product selector are dialogs opened fresh each
+  time (open_address_selector()/open_product_selector()), so retrying them
+  after creating the missing Debtor/Product elsewhere queries live, current
+  data - no staleness.
+- A Product's own VAT rate is the one dependency handled the brief's way
+  rather than lazily from inside the Product editor: checked against the
+  VATs list and created there first, before ``create_product()`` is ever
+  called, so its VAT combo simply never renders before the rate exists -
+  nothing to refresh in place.
+- The Debtor's own Payment combo and the Order's own Shipping combo don't
+  have that luxury - both live inside an editor that has already been open
+  for a while by the time the missing record is discovered. Both are
+  handled the same confirmed-live way: a bare Ctrl+S sent to that same
+  still-open editor, after the record now exists, refreshes the combo in
+  place and saves cleanly, with no need to abandon the editor or fill a
+  second one from scratch. See ``create_debtor()`` for the full story,
+  including why this doesn't contradict the earlier finding that saving a
+  Debtor with literally no payment term *anywhere in the workspace* fails
+  outright.
 """
 
 from __future__ import annotations
@@ -39,6 +66,7 @@ class FlowResult:
 def run_order_flow(session: FakturamaSession, doc: OrderDoc) -> FlowResult:
     """Drive the whole brief end to end against an already-open Fakturama."""
     window = session.focus()
+
     # The Items grid's Discount column sits far enough right that a
     # non-maximised window scrolls it out of view - see OrderEditor's
     # cell-editing notes for why that matters. Confirmed live: this call can
@@ -52,31 +80,61 @@ def run_order_flow(session: FakturamaSession, doc: OrderDoc) -> FlowResult:
         window.maximize()
         time.sleep(1.0)
 
-    # A brand-new/wiped workspace has no Shipping record at all, and opening
-    # a New Order hard-fails with a modal Error dialog ("No default value
-    # found for Shippings") until one is marked standard - not something to
-    # dismiss and work around, since it blocks the Order editor from
-    # opening at all. Must exist before the first open_new_order() call.
-    create_default_shipping_method(session)
+    order_editor = open_new_order(session)
+    order_editor.set_date(doc.order_date)
+    order_editor.set_cust_ref(doc.external_reference)
+    order_editor.set_price_mode("Net")
+    order_editor.set_vat_mode("With VAT")
 
-    # Created before the Debtor editor ever opens: a fresh editor enumerates
-    # its Payment combo from whatever exists at that moment, so there is no
-    # staleness to work around as long as the term already exists first.
-    create_payment_method(session, doc.payment.method)
-    for vat_percent in doc.distinct_vat_rates:
-        create_vat_rate(session, _vat_rate_name(vat_percent), f"{_decimal_text(vat_percent)}%")
-    for item in doc.items:
-        create_product(
-            session,
-            sku=item.sku,
-            name=item.description,
-            gross_price=str(item.product_master_gross_price),
-            vat_name=item.vat_rate_name,
-        )
+    order_editor = _resolve_debtor(session, order_editor, doc.customer, doc.payment.method)
 
-    create_debtor(session, doc.customer, payment_method=doc.payment.method)
+    created_vat_rates: set[str] = set()
+    for index, item in enumerate(doc.items):
+        if not order_editor.add_item(item.sku):
+            # Per the brief: check the VAT list and create the rate there
+            # first if it's missing, before ever creating the Product that
+            # references it - never inside an already-open Product editor,
+            # which would leave that editor's own VAT combo stale.
+            if item.vat_rate_name not in created_vat_rates:
+                create_vat_rate(session, item.vat_rate_name, f"{_decimal_text(item.vat_percent)}%")
+                created_vat_rates.add(item.vat_rate_name)
+            create_product(
+                session,
+                sku=item.sku,
+                name=item.description,
+                gross_price=str(item.product_master_gross_price),
+                vat_name=item.vat_rate_name,
+            )
+            order_editor = OrderEditor(session, session.activate_tab("New Order"))
+            if not order_editor.add_item(item.sku):
+                raise ManualReviewRequired(
+                    "Product was created but still not found in the product selector",
+                    sku=item.sku,
+                )
 
-    order_editor = build_order(session, doc)
+        order_editor.set_item_quantity(index, _decimal_text(item.quantity))
+        if item.discount_percent:
+            order_editor.set_item_discount_percent(index, _decimal_text(item.discount_percent))
+
+    # Left blank on a wiped workspace (see open_new_order()'s docstring) -
+    # filled in now, lazily, right before the field actually matters. Same
+    # shape as the Debtor's Payment combo: if the method doesn't exist yet,
+    # creating it while this same Order editor is open would otherwise
+    # leave the Shipping combo stale, so a Ctrl+S on the reactivated Order
+    # tab forces the same in-place refresh confirmed live for Payment.
+    shipping_name = "Free of shipping costs"
+    if not order_editor.has_shipping_method(shipping_name):
+        create_default_shipping_method(session, shipping_name)
+        order_editor = OrderEditor(session, session.activate_tab("New Order"))
+        order_editor.root.type_keys("^s", set_foreground=False)
+        time.sleep(1.0)
+        if not order_editor.has_shipping_method(shipping_name):
+            raise ManualReviewRequired(
+                "shipping method still not available on the Order after a Ctrl+S refresh",
+                method=shipping_name,
+            )
+    order_editor.set_shipping_method(shipping_name)
+
     order_editor.save()
     order_number = order_editor.order_number()
     # Read while the Order tab is still the active one - its content pane
@@ -101,8 +159,70 @@ def run_order_flow(session: FakturamaSession, doc: OrderDoc) -> FlowResult:
     )
 
 
+def _resolve_debtor(
+    session: FakturamaSession, order_editor: OrderEditor, customer: Party, payment_method: str
+) -> OrderEditor:
+    """Select the customer's address on the Order, creating the Debtor on a genuine miss."""
+    search_text = _debtor_search_text(customer)
+    if order_editor.select_address(search_text):
+        return order_editor
+
+    create_debtor(session, customer, payment_method=payment_method)
+    order_editor = OrderEditor(session, session.activate_tab("New Order"))
+    if not order_editor.select_address(search_text):
+        raise ManualReviewRequired(
+            "Debtor was created but still not found in the address selector",
+            search_text=search_text,
+        )
+    return order_editor
+
+
 def create_debtor(session: FakturamaSession, customer: Party, *, payment_method: str) -> ContactEditor:
-    """Steps 2.5-2.10: a new Debtor with both addresses, alias, and payment method."""
+    """Steps 2.5-2.10: a new Debtor with both addresses, alias, and payment method.
+
+    If the payment term doesn't exist yet, creating it while this same
+    Debtor editor is open would normally leave its Payment combo stale
+    (see docs/challenges.md). Confirmed live: a Ctrl+S on the still-open
+    Debtor - after the term now exists, before Payment is ever set -
+    refreshes that combo in place *and* saves cleanly (no error, despite
+    Payment still being unset at that moment) - a real Fakturama
+    refresh-on-save behaviour, not a guess. That save is what a second,
+    completely separate attempt earlier in this project's history got
+    wrong: saving *before* the term existed anywhere in the system failed
+    outright ("Document number invalid" / "Failed to persist contents of
+    part"). The two situations look identical from this function's own
+    perspective (a Debtor being saved without Payment set) but are not:
+    what actually matters is whether some payment term already exists in
+    the workspace at all, not whether this specific record references one
+    yet.
+    """
+    editor = _fill_new_debtor(session, customer)
+
+    if not editor.has_payment_method(payment_method):
+        create_payment_method(session, payment_method)
+        # create_payment_method() switches tabs internally (list -> new term
+        # editor -> save) - the Debtor tab is no longer active by the time it
+        # returns, and its content is torn down along with every inactive
+        # tab in this app. Reactivate it (and its Miscellaneous sub-tab,
+        # torn down the same way) before touching it again.
+        content = session.activate_tab("New Debtor")
+        editor = ContactEditor(session, content)
+        editor.open_miscellaneous_tab()
+        editor.root.type_keys("^s", set_foreground=False)
+        time.sleep(1.0)
+        if not editor.has_payment_method(payment_method):
+            raise ManualReviewRequired(
+                "payment method still not available on the Debtor after a Ctrl+S refresh",
+                method=payment_method,
+            )
+
+    editor.set_payment_method(payment_method)
+    editor.save()
+    return editor
+
+
+def _fill_new_debtor(session: FakturamaSession, customer: Party) -> ContactEditor:
+    """Everything on the Debtor except Payment - shared by both attempts in create_debtor()."""
     editor = open_new_debtor(session)
 
     if customer.company:
@@ -139,40 +259,15 @@ def create_debtor(session: FakturamaSession, customer: Party, *, payment_method:
         editor.set_alias(customer.alias)
     editor.set_discount_zero()
     editor.set_net_or_gross("Net")
-
-    if not editor.has_payment_method(payment_method):
-        raise ManualReviewRequired(
-            "payment method not available on the Debtor even after creating it standalone",
-            method=payment_method,
-        )
-    editor.set_payment_method(payment_method)
-
-    editor.save()
     return editor
 
 
-def build_order(session: FakturamaSession, doc: OrderDoc) -> OrderEditor:
-    """Steps 1.3-3.x: header, the saved Debtor's address, and every line item."""
-    editor = open_new_order(session)
-    editor.set_date(doc.order_date)
-    editor.set_cust_ref(doc.external_reference)
-    editor.set_price_mode("Net")
-    editor.set_vat_mode("With VAT")
-
-    # Confirmed live: the address selector's search matches against the
-    # visible columns (No./First Name/Name/Company/ZIP/City) but not the
-    # Alias field - "NORTHSTAR-BERLIN" (the alias) matched nothing, while
-    # "Northstar" (the company) did. Company/last name first, alias last.
-    search_text = doc.customer.company or doc.customer.last_name or doc.customer.alias or ""
-    editor.select_address(search_text)
-
-    for index, item in enumerate(doc.items):
-        editor.add_item(item.sku)
-        editor.set_item_quantity(index, _decimal_text(item.quantity))
-        if item.discount_percent:
-            editor.set_item_discount_percent(index, _decimal_text(item.discount_percent))
-
-    return editor
+def _debtor_search_text(customer: Party) -> str:
+    """Confirmed live: the address selector's search matches against the
+    visible columns (No./First Name/Name/Company/ZIP/City) but not the
+    Alias field - "NORTHSTAR-BERLIN" (the alias) matched nothing, while
+    "Northstar" (the company) did. Company/last name first, alias last."""
+    return customer.company or customer.last_name or customer.alias or ""
 
 
 def _read_invoice_number(session: FakturamaSession) -> str:
@@ -182,10 +277,6 @@ def _read_invoice_number(session: FakturamaSession) -> str:
         if name.lstrip("*").startswith("INV"):
             return name.lstrip("*")
     return ""
-
-
-def _vat_rate_name(percent: Decimal) -> str:
-    return f"VAT {_decimal_text(percent)}%"
 
 
 def _decimal_text(value: Decimal) -> str:

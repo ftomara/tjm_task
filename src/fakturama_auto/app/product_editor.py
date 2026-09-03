@@ -12,11 +12,19 @@ from __future__ import annotations
 from typing import Any
 
 from ..errors import ControlNotFound
-from ..uia.locator import Locator
+from ..uia.locator import Locator, matches_text
 from .base import Page, click_and_await_pane
 
-NEW_PRODUCT_LINK = Locator(control_type="Text", name="New product").labelled(
-    "left-panel New product link"
+PRODUCTS_LINK = Locator(control_type="Text", name="Products").labelled("left-panel Products link")
+#: The left panel's own "New" section has a "New product" link too, but it
+#: was confirmed live, repeatedly, to silently do nothing on this build -
+#: no exception, no new tab, nothing - reproduced from a completely fresh
+#: Fakturama launch, ruling out session-specific state. The Products
+#: list's own "Create a new product" toolbar button (the same
+#: list-plus-its-own-create-button shape already used for VATs, Shippings
+#: and terms of payment) works reliably every time it was tried instead.
+CREATE_BUTTON = Locator(control_type="Button", name="Create a new product").labelled(
+    "Create a new product button"
 )
 
 ITEM_NUMBER = Locator(control_type="Edit", name="Item Number").labelled("Item Number field")
@@ -24,9 +32,15 @@ NAME = Locator(control_type="Edit", name="Name").labelled("product Name field")
 VAT = Locator(control_type="ComboBox", name="VAT").labelled("product VAT dropdown")
 
 
-def open_new_product(session: Any) -> "ProductEditor":
+def open_products_list(session: Any) -> Any:
     window = session.focus()
-    content = click_and_await_pane(window, NEW_PRODUCT_LINK, "New product")
+    return click_and_await_pane(window, PRODUCTS_LINK, "Products")
+
+
+def open_new_product(session: Any) -> "ProductEditor":
+    open_products_list(session)
+    window = session.focus()
+    content = click_and_await_pane(window, CREATE_BUTTON, "New product")
     return ProductEditor(session, content)
 
 
@@ -42,6 +56,12 @@ class ProductEditor(Page):
     def set_gross_price(self, value: str) -> None:
         field = self.field_after_label("Price (gross)", control_types=("Edit",))
         self.set_text(field, value)
+
+    def vat_options(self) -> list[str]:
+        return self.combo_options(VAT)
+
+    def has_vat(self, vat_name: str) -> bool:
+        return any(matches_text(opt, vat_name) for opt in self.vat_options())
 
     def set_vat(self, vat_name: str) -> None:
         self.select_combo(VAT, vat_name)
@@ -62,7 +82,13 @@ class ProductEditor(Page):
 
 
 def create_product(session: Any, *, sku: str, name: str, gross_price: str, vat_name: str) -> None:
-    """Create and save a product master record."""
+    """Create and save a product master record.
+
+    Per the brief: the VAT rate is checked against the VATs list and
+    created there first if missing, *before* this is ever called - this
+    function expects ``vat_name`` to already be a selectable option and
+    does not create it itself. See ``run_order_flow``'s items loop.
+    """
     editor = open_new_product(session)
     editor.set_item_number(sku)
     editor.set_name(name)

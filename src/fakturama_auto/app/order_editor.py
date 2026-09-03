@@ -27,7 +27,7 @@ from __future__ import annotations
 from datetime import date as date_type
 from typing import Any
 
-from ..errors import ControlNotFound
+from ..errors import AutomationError, ControlNotFound
 from ..uia.locator import Locator
 from ..uia.waits import WaitTimeout, retry
 from .base import Page, date_verifier
@@ -100,24 +100,59 @@ def open_new_order(session: Any) -> "OrderEditor":
     accessible name. They differ in control type (``Tab`` vs. ``Pane``), so
     filtering on ``Pane`` is what keeps a second open order - or any other
     tab - from being mistaken for this one's content.
+
+    A wiped workspace has no default Shipping method, and clicking Order
+    without one shows a modal Error dialog (see docs/challenges.md) - but
+    confirmed live, the click still genuinely opens the New Order tab; the
+    dialog just sits on top of it. And, the same as every other modal in
+    this app, the content behind a modal dialog is torn from the UIA tree
+    while it's open - not merely hidden, the same "inactive tab" rule
+    documented elsewhere in this project, just triggered by a dialog
+    instead of a different tab taking focus. Dismissing it is enough: the
+    Order's own Shipping field is simply left blank (nothing in this flow
+    ever reads or sets it), and the tab is otherwise perfectly usable -
+    there is no need to create a default Shipping method or click Order
+    again. Clicking again after dismissing was tried and confirmed wrong:
+    it opens a second, genuinely separate Order every time this path
+    fires, and a later name-based tab lookup can then silently grab that
+    one instead of the tab the rest of the flow has been filling in.
     """
     window = session.focus()
 
-    def _open() -> Any:
+    def _click_order() -> None:
         control = NEW_ORDER_BUTTON.find(window, timeout=10.0)
         try:
             control.invoke()
         except Exception:  # noqa: BLE001 - not every SWT control exposes Invoke
             control.click_input()
+
+    def _open() -> Any:
+        _click_order()
+        _dismiss_shipping_error(session)
         return Locator(control_type="Pane", name="New Order").labelled(
             "New Order editor content"
         ).find(window, timeout=15.0)
 
-    # Retries the whole click-and-wait cycle, re-finding the button each
-    # time - see base.click_and_await_pane's docstring: the very first such
-    # action against a just-launched Fakturama can silently drop its click.
-    content = retry(_open, attempts=3, delay=1.0, description="opening 'New Order'")
+    # A light safety net for a genuine dropped click (the generic
+    # cold-start quirk documented on click_and_await_pane), not for the
+    # Shipping dialog - that case is already fully handled above without
+    # ever needing a second click.
+    content = retry(_open, attempts=2, delay=1.0, description="opening 'New Order'")
     return OrderEditor(session, content)
+
+
+def _dismiss_shipping_error(session: Any) -> bool:
+    """If the 'No default value found for Shippings' Error dialog is open,
+    dismiss it and return True; otherwise return False without touching
+    anything else."""
+    try:
+        dialog = session.dialog(r"^Error$", timeout=3.0)
+    except AutomationError:
+        return False
+    if not Locator(control_type="Text", name_re=r".*Shippings.*").exists(dialog):
+        return False
+    Locator(control_type="Button", name="OK").find(dialog, timeout=5.0).click_input()
+    return True
 
 
 class OrderEditor(Page):
@@ -159,6 +194,27 @@ class OrderEditor(Page):
         """
         return self.field_after_label(label, control_types=("Image",), offset=index + 1)
 
+    def _open_dialog_via_icon(self, opener: Any, title_re: str, attempts: int = 3) -> Any:
+        """Click an icon and wait for the dialog it opens, retrying the
+        whole click-and-wait cycle - not just the click - if the dialog
+        never appears.
+
+        Confirmed live: a click on the address/product selector icon can be
+        silently dropped the same way the cold-start button clicks
+        documented on ``click_and_await_pane`` are - no exception, the
+        dialog just never shows up, and waiting longer doesn't help. Since
+        ``opener()`` re-finds and re-clicks the icon fresh each attempt
+        (unlike retrying a bare ``click_input()`` on an already-resolved
+        reference), a second attempt succeeds once whatever briefly made
+        the first one land nowhere has passed.
+        """
+
+        def _open_and_wait() -> Any:
+            opener()
+            return self.session.dialog(title_re, timeout=10.0)
+
+        return retry(_open_and_wait, attempts=attempts, delay=1.0, description=f"opening {title_re!r}")
+
     def open_address_selector(self) -> None:
         """Step 2.1: the upper icon. Opens the 'Select the address' dialog."""
         icon = self._icon_after_label(ADDRESSES_LABEL, ADDRESS_SELECTOR_ICON_INDEX)
@@ -174,8 +230,13 @@ class OrderEditor(Page):
         icon = self._icon_after_label(ADDRESSES_LABEL, NEW_DEBTOR_ICON_INDEX)
         self.click(icon)
 
-    def select_address(self, search_text: str) -> None:
+    def select_address(self, search_text: str) -> bool:
         """Step 2.1-2.2: search the address selector and choose the match.
+
+        Returns whether a match was found and selected - the lazy,
+        order-first flow needs to know this to decide whether to branch off
+        and create the Debtor, so this reports the outcome instead of
+        assuming success or raising.
 
         Confirmed live: typing text that matches exactly one row sometimes
         auto-confirms and closes the dialog on its own (seen reliably for
@@ -188,10 +249,14 @@ class OrderEditor(Page):
         (the same opaque-table pattern as the Items grid), so the row is
         reached by a coordinate offset from the dialog's own frame and the
         search box's rectangle, both of which *are* grounded - not a fixed
-        screen coordinate.
+        screen coordinate. If neither the auto-close nor the double-click
+        produces a match, there is no reliable "zero rows" signal from this
+        opaque grid to check directly - a real risk if the double-click
+        coordinate ever drifts on a genuine match, but this shape has held
+        across every case tried this session - so the dialog is explicitly
+        cancelled and treated as "not found" rather than left open.
         """
-        self.open_address_selector()
-        dialog = self.session.dialog(r"^Select the address$", timeout=10.0)
+        dialog = self._open_dialog_via_icon(self.open_address_selector, r"^Select the address$")
         search = Locator(control_type="Edit").labelled("address search box").find(
             dialog, timeout=5.0
         )
@@ -200,7 +265,7 @@ class OrderEditor(Page):
 
         try:
             self.session.dialog_closed(r"^Select the address$", timeout=2.0)
-            return
+            return True
         except WaitTimeout:
             pass
 
@@ -211,7 +276,13 @@ class OrderEditor(Page):
         row_x = dialog_rect.left + 60
         row_y = search_rect.bottom + 45
         double_click(coords=(row_x, row_y))
-        self.session.dialog_closed(r"^Select the address$", timeout=10.0)
+        try:
+            self.session.dialog_closed(r"^Select the address$", timeout=5.0)
+            return True
+        except WaitTimeout:
+            cancel = Locator(control_type="Button", name="Cancel").find(dialog, timeout=5.0)
+            cancel.click_input()
+            return False
 
     def invoice_address_text(self) -> str:
         """The read-only, formatted address block shown once a Debtor is selected."""
@@ -237,30 +308,52 @@ class OrderEditor(Page):
         icon = self._icon_after_label(ITEMS_LABEL, PRODUCT_SELECTOR_ICON_INDEX)
         self.click(icon)
 
-    def add_item(self, sku: str) -> None:
+    def add_item(self, sku: str) -> bool:
         """Step 3.2-3.3: add a line by SKU via the product selector's search.
 
-        Confirmed live: typing a SKU that matches exactly one product
-        auto-selects and closes the dialog on its own - no separate row
-        click or OK needed. If the dialog is still open after typing (no
-        match, or an ambiguous one), it is cancelled and the failure is
-        raised explicitly rather than left as a silently-empty Items row.
+        Returns whether the product was found and added - the lazy,
+        order-first flow needs this to decide whether to branch off and
+        create the Product (and its VAT rate, if that's missing too).
+
+        Confirmed live, and inconsistent in the same way already documented
+        for the address selector (``select_address``): a SKU matching
+        exactly one product sometimes auto-closes the dialog on its own,
+        and sometimes just filters the grid to one visible, correct row
+        without selecting it - seen for the identical search text on two
+        different runs. So this follows the same two-rung approach: wait
+        briefly for an auto-close, then double-click the sole remaining
+        row (reached by a coordinate offset from the dialog's own frame and
+        the search box, both grounded - the grid itself is UIA-opaque, the
+        same pattern as the address selector and Items grid). Only cancels
+        and reports not-found if neither produces a close.
         """
-        self.open_product_selector()
-        dialog = self.session.dialog(r"^Select a product$", timeout=10.0)
+        dialog = self._open_dialog_via_icon(self.open_product_selector, r"^Select a product$")
         search = Locator(control_type="Edit").labelled("product search box").find(
             dialog, timeout=5.0
         )
         search.click_input()
         search.type_keys(sku, with_spaces=True, set_foreground=False)
+
         try:
-            self.session.dialog_closed(r"^Select a product$", timeout=3.0)
-        except WaitTimeout as exc:
-            cancel = Locator(control_type="Button", name="Cancel").find(dialog, timeout=3.0)
+            self.session.dialog_closed(r"^Select a product$", timeout=2.0)
+            return True
+        except WaitTimeout:
+            pass
+
+        from pywinauto.mouse import double_click
+
+        dialog_rect = dialog.rectangle()
+        search_rect = search.rectangle()
+        row_x = dialog_rect.left + 60
+        row_y = search_rect.bottom + 45
+        double_click(coords=(row_x, row_y))
+        try:
+            self.session.dialog_closed(r"^Select a product$", timeout=5.0)
+            return True
+        except WaitTimeout:
+            cancel = Locator(control_type="Button", name="Cancel").find(dialog, timeout=5.0)
             cancel.click_input()
-            raise ControlNotFound(
-                f"no unique product match for SKU {sku!r} in the product selector"
-            ) from exc
+            return False
 
     # -- Items grid cell editing --------------------------------------------
     #
@@ -345,6 +438,19 @@ class OrderEditor(Page):
             "New Invoice editor content"
         ).find(self.session.focus(), timeout=15.0)
         return InvoiceEditor(self.session, content)
+
+    # -- shipping ------------------------------------------------------------
+
+    def shipping_method_options(self) -> list[str]:
+        return self.combo_options(SHIPPING_METHOD)
+
+    def has_shipping_method(self, method: str) -> bool:
+        from ..uia.locator import matches_text
+
+        return any(matches_text(opt, method) for opt in self.shipping_method_options())
+
+    def set_shipping_method(self, method: str) -> None:
+        self.select_combo(SHIPPING_METHOD, method)
 
     # -- totals read-back (step 4.3) ---------------------------------------
 
