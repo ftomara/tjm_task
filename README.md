@@ -2,9 +2,7 @@
 
 Turns a photographed/rendered sales order into a saved, linked, paid **Order → Invoice** pair inside [Fakturama](https://www.fakturama.info/) (an Eclipse RCP / SWT desktop accounting app), driven entirely through Windows UI Automation — no hardcoded screen coordinates anywhere on the path.
 
-**Demo:** [demo.mp4](./demo.mp4) — a full recorded run against a wiped workspace.
-*(Not committed to git — it's ~190MB and git isn't built for large binaries. It sits alongside the repo locally; share it separately if you need to hand it off.)*
-
+**Demo:** [demo.mp4](https://drive.google.com/file/d/1MZW8toXVQ-JoqdYCHUqcD3YkswINFEvZ/view?usp=drive_link) — a full recorded run against a wiped workspace.
 ## What it does
 
 1. **Reads the order image** with a vision LLM (Gemini) and validates the result arithmetically — every line's `qty × price × (1 − discount%)` and the printed net/VAT/gross totals all have to agree with each other before anything gets typed into the UI.

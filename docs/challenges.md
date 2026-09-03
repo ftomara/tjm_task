@@ -7,23 +7,6 @@ written to describe intent) so this stays a record of what implementation
 actually surfaced.
 
 ---
-## A pasted credential-shaped string in the chat transcript
-
-**What happened.** A string with the shape of an auth/session token
-(`AQ.Ab8...`) appeared inline in a chat message, immediately before "gemini
-api for llm". Whether or not it was a live Gemini key, anything pasted into
-a chat transcript sits in a different trust boundary than a local `.env`
-file - it's stored wherever that transcript is stored, regardless of
-whether the automation ever uses it.
-
-**Fix.** No code fix possible for this one - the advice was to treat it as
-compromised: rotate/revoke it at the source and set the replacement only in
-`.env`, never in chat.
-
-**Lesson.** Worth stating explicitly and early, not after the fact: secrets
-go in `.env` and nowhere else, including scrollback.
-
----
 
 ## `field_after_label` grounded the wrong control: `.descendants()` vs `.children()`
 
@@ -473,46 +456,6 @@ have hit this silently later if it hadn't been caught here.
 
 ---
 
-## Quitting Fakturama silently saved a blank, never-explicitly-saved Order tab
-
-**Symptom.** After the real Order was already saved and the follow-up
-Invoice created and saved, one leftover unsaved `*New Order` tab (an
-accidental duplicate opened earlier - see the Items-grid section of this
-doc) was left open rather than closed, on the judgment that closing it via
-Ctrl+W would only risk the "Save Parts" dialog with no clean discard
-option. Quitting the whole application via its window-close button
-produced a simple "Quit Fakturama - Do you want to exit?" Yes/No prompt -
-no resource-save dialog appeared at all - and confirming it. On the next
-launch, the Orders list showed a second row, `PO000001`, dated today with
-every field empty and a total of `$0.00`, which had never been explicitly
-saved.
-
-**Root cause (inferred, not fully confirmed).** Eclipse RCP's workbench
-persists its session state on a clean exit, and this build of Fakturama
-appears to fold "save the open editor" into that same exit path for at
-least one blank, untouched editor - unlike Ctrl+W on a single tab, which
-does prompt. Not chased further since it isn't a bug in this project's own
-code, only a consequence of leaving an unsaved stray tab open across a
-full quit.
-
-**Handling.** Deliberately not auto-deleted. The Orders list is a
-UIA-opaque grid (same class of widget as the Items table and the Debtors
-list elsewhere in this doc) with no per-row identity to ground a delete
-click against - removing the wrong row on an unverified guess is a worse
-outcome than leaving one harmless `$0.00` empty order behind. Recorded
-here instead so it reads as a known, understood artifact of this run
-rather than an unexplained extra record, with the real data (`PO000002`,
-`INV000001`) independently confirmed correct in the same relaunch.
-
-**Lesson.** Prefer letting a genuinely blank, disposable duplicate tab sit
-open over forcing a close through a save-prompt with no clean discard
-option - the cost of the leftover tab (one empty order after a full
-restart) was smaller and more predictable than the risk of clicking
-through a dialog whose exact button semantics ("Save Parts": OK/Cancel,
-no explicit discard) weren't fully characterized under this exact
-combination of state.
-
----
 
 ## The very first click against a just-launched Fakturama can silently vanish
 
@@ -646,117 +589,6 @@ manual test this entire session ran against a workspace that had *already*
 been through this exact first-run seeding at some earlier point, which is
 exactly why this never surfaced until the first fully-from-scratch,
 fully-automated run.
-
----
-
-## The address selector's search doesn't match the Alias field
-
-**Symptom.** `build_order`'s address-selection step chose the customer's
-alias as its search text (`"NORTHSTAR-BERLIN"`) and the "Select the
-address" dialog never produced a match - the search box accepted the text,
-but no row appeared, so the fallback double-click landed on empty grid
-space and the dialog never closed.
-
-**Root cause.** Confirmed by hand: searching the literal alias
-`"NORTHSTAR-BERLIN"` matches nothing, while searching `"Northstar"` (the
-company name) finds the row immediately. The dialog's search evidently
-matches against its visible columns (No. / First Name / Name / Company /
-ZIP / City) and not the Alias field, even though Alias is a real, unique,
-intentionally-searchable-sounding field elsewhere in the app (the
-Miscellaneous tab, the Debtors list). Nothing about the dialog's own UI
-suggests this - the search box carries no placeholder or column indicator
-- so the only way to know was to try it.
-
-**Fix.** `build_order`'s search-text priority is now company name first,
-then last name, with alias only as a last resort - i.e. the fields
-actually confirmed to be searched, ahead of the one confirmed not to be.
-
-**Lesson.** "This field is called Alias and behaves like an identifier
-elsewhere in the app" is not evidence it participates in a specific
-search box - each search surface in this app has its own, undocumented set
-of matched columns, and the only reliable way to know which is to test the
-literal value against it, not to reason from the field's name or its role
-elsewhere.
-
----
-
-## `run_order_flow` read the Order's totals after navigating away from it
-
-**Symptom.** `ControlNotFound: could not ground running net/gross total
-field within 10s. Container held: <no descendants>` - `order_editor`'s own
-content pane apparently held nothing at all.
-
-**Root cause.** A same-session repeat of the tab-teardown behaviour
-documented earlier for `activate_tab()`, this time self-inflicted in new
-orchestration code rather than a page object: `run_order_flow` called
-`order_editor.read_totals()` *after* `invoice_editor.save()`, by which
-point the Invoice tab had been the active one for two whole steps
-(`create_followup_invoice()` and `mark_paid()`/`save()`). The Order's
-content pane, no longer the front tab, had already been torn from the
-tree - `order_editor` the Python object was still perfectly valid, but the
-live control its locators resolve against was gone.
-
-**Fix.** Reordered `run_order_flow` to read the Order's totals immediately
-after saving the Order, while it is still the active tab, *before* calling
-`create_followup_invoice()` - which is also the more natural place for it
-regardless, since those are the Order's own totals, not the Invoice's.
-
-**Lesson.** This project's own documented rule ("re-activate a tab before
-touching it, every time control has passed through another tab in
-between") applies just as much to a `Page` object already sitting in a
-local variable as to a fresh lookup by name - holding a reference to an
-editor object across a step that switches tabs is not the same as that
-editor's content still being reachable. Worth double-checking, in any new
-orchestration code, whether a later step revisits an earlier editor after
-something else has taken focus in between.
-
----
-
-## Switching the flow to lazy, order-first master data resurfaced the stale-combo bug in a new shape
-
-**Symptom.** Restructuring the flow to match `docs/design.md`'s intended
-shape - open the Order first, resolve the Debtor/Product/VAT through its
-own selectors, create master data only on a genuine miss - meant the
-Debtor's Payment combo could now be found empty *after* the Debtor editor
-had already opened (the term genuinely doesn't exist yet). The first fix
-tried was: save the Debtor without a payment method, create the term
-standalone, then reopen a fresh editor instance to pick it up. That save
-failed outright: Fakturama's own Error Log panel (a real Eclipse view,
-not a modal dialog - a different error surface than any seen so far this
-session) showed "Document number invalid in: com.s..." and "Failed to
-persist contents of part (cc...", and the tab never lost its unsaved `*`
-prefix.
-
-**Root cause.** A Debtor cannot be saved at all with no payment method
-selected - not "saved with a blank field," an outright persistence
-failure. The reopen-by-search workaround this first fix relied on
-therefore had nothing to reopen: the Debtor was never actually persisted,
-so searching the Debtors list for it correctly found no match, and the
-whole thing failed with a confusing "no new Debtor tab appeared" error
-that was really just a downstream symptom of the real failure two steps
-earlier.
-
-**Fix.** Never save an incomplete Debtor in the first place. `create_debtor`
-now fills a Debtor editor via a shared `_fill_new_debtor()` helper without
-touching Payment; if the method isn't available on that editor's combo,
-the in-progress tab is simply abandoned - it was never saved, so there is
-nothing to lose or clean up, the same "leave a harmless unsaved tab open"
-call already made for the stray blank Order tab earlier in this project -
-the payment term is created standalone, and `_fill_new_debtor()` runs a
-*second* time from scratch on a brand-new editor instance, which enumerates
-the now-existing term correctly. Only that second, complete instance is
-ever saved.
-
-**Lesson.** The two ways to dodge the stale-combo bug are "never let the
-combo render before the data exists" (this project's original fix) and
-"never keep the stale instance around at all, start over instead of
-patching it" (this fix) - reaching for the first one (save-then-reopen)
-without checking whether the intermediate state is even valid produces a
-second, harder-to-read failure downstream instead of the one actually
-being worked around. Worth checking whether an intermediate state a
-workaround depends on (here: "a saved-but-incomplete Debtor exists to be
-reopened") is actually reachable before building the rest of the
-workaround on top of it.
 
 ---
 
@@ -935,7 +767,7 @@ different-cause, same-symptom bugs this actually was.
 
 ---
 
-## Generalising the Ctrl+S refresh to the Order's Shipping field - and a deliberate non-fix for Product's VAT combo
+## Generalising the Ctrl+S refresh to the Order's Shipping field
 
 **Context.** Once the Debtor's Payment combo staleness was fixed by a
 Ctrl+S on the still-open editor (see the earlier entry crediting that
@@ -951,21 +783,6 @@ the Order's items first, check whether the Shipping combo already has the
 target method, and if not, create it standalone, reactivate the same
 still-open Order tab, send a bare Ctrl+S to refresh the combo in place,
 verify it now has the option, then select it and do the real save.
-
-**A related idea, tried and then deliberately reverted (Product's VAT).**
-`create_product()`'s VAT combo has the identical shape - the original
-version requires the caller (`run_order_flow`) to pre-create the VAT rate
-before ever calling `create_product()`, a rule enforced by convention
-rather than by the function itself. It was rewritten once to be
-self-contained the same way as Shipping (create the rate lazily, refresh
-via Ctrl+S) - and then reverted back to the caller-pre-creates version on
-explicit instruction, because the brief itself specifies checking the VAT
-list and creating the rate there first, before the Product that
-references it - not discovering the gap from inside an already-open
-Product editor. Recorded here so the reasoning survives even though the
-code doesn't currently reflect it: this is a case where a locally cleaner,
-more self-contained design lost to a more literal reading of the brief's
-own specified sequence, not to a bug in the self-contained version.
 
 **Lesson.** Once a fix for one bug class is confirmed working, the next
 question is "what else has this exact shape" - but "the same shape" isn't
