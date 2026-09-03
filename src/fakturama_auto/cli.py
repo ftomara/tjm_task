@@ -137,9 +137,11 @@ def cmd_extract(args: argparse.Namespace) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     from .flow import run_order_flow
+    from .runlog import RunLog
     from .uia import FakturamaSession
 
     settings = load_settings()
+    runlog = RunLog(settings, console=console)
 
     if args.image:
         required_key = {"gemini": "GEMINI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}.get(
@@ -187,7 +189,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
     session = FakturamaSession.launch(settings) if args.launch else FakturamaSession.attach(settings)
 
-    result = run_order_flow(session, doc)
+    try:
+        result = run_order_flow(session, doc, runlog=runlog)
+    except Exception as exc:
+        runlog.finish("failed", error=str(exc), error_type=type(exc).__name__)
+        raise
+
+    runlog.finish("ok", order=result.order_number, invoice=result.invoice_number)
 
     summary = Table.grid(padding=(0, 2))
     summary.add_column(style="dim")
