@@ -7,7 +7,7 @@ Turns a photographed/rendered sales order into a saved, linked, paid **Order →
 
 ## What it does
 
-1. **Reads the order image** with a vision LLM (Gemini by default, Claude as an alternative) and validates the result arithmetically — every line's `qty × price × (1 − discount%)` and the printed net/VAT/gross totals all have to agree with each other before anything gets typed into the UI.
+1. **Reads the order image** with a vision LLM (Gemini) and validates the result arithmetically — every line's `qty × price × (1 − discount%)` and the printed net/VAT/gross totals all have to agree with each other before anything gets typed into the UI.
 2. **Drives Fakturama** to create the Debtor, the Products, the VAT rate, the Order (header, address, line items, discounts), the linked follow-up Invoice, and the payment status — reading every value back after writing it, not just clicking and hoping.
 3. **Verifies** by reading the totals off the saved Order and the paid state off the saved Invoice, and prints a summary.
 
@@ -24,12 +24,10 @@ pip install -e ".[dev]"
 copy .env.example .env
 ```
 
-Edit `.env` (never commit it — it's gitignored) and add whichever key you'll use:
+Edit `.env` (never commit it — it's gitignored) and add your key:
 
 ```
-GEMINI_API_KEY=...        # default provider
-# or
-ANTHROPIC_API_KEY=...     # via --provider anthropic
+GEMINI_API_KEY=...
 # FAKTURAMA_EXE=C:\Program Files\Fakturama2\Fakturama.exe   # only if it's not in a usual install location
 ```
 
@@ -44,7 +42,7 @@ fakturama-auto run --image assets\test_orders\image.png --launch
 ```
 
 - `--launch` starts Fakturama if it isn't already running; omit it to attach to an already-open instance instead (the default — an RCP cold start plus workspace/database init is slow, so attaching to a running app is the faster loop while iterating).
-- `--provider gemini|anthropic` picks the vision model (`gemini` is the default).
+- `--provider gemini` picks the vision model (`gemini` is the only one and the default).
 - The extraction is kept in memory and also saved as a timestamped backup under `artifacts/<run-id>/extraction.json` for reference — never as the trusted fixture, so nothing is silently replayed on the next run by accident.
 
 **Replay a previously-saved extraction instead of calling the API** (useful once you trust an extraction, or if you're rate-limited):

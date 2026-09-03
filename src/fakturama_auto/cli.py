@@ -99,10 +99,8 @@ def main(argv: list[str] | None = None) -> int:
 def cmd_extract(args: argparse.Namespace) -> int:
     settings = load_settings()
 
-    required_key = {"gemini": "GEMINI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}.get(args.provider)
-    have_key = {"gemini": settings.gemini_api_key, "anthropic": settings.anthropic_api_key}.get(
-        args.provider
-    )
+    required_key = {"gemini": "GEMINI_API_KEY"}.get(args.provider)
+    have_key = {"gemini": settings.gemini_api_key}.get(args.provider)
     if required_key and not have_key:
         console.print(
             f"[yellow]No {required_key} found.[/] Copy .env.example to .env and add a key, "
@@ -144,13 +142,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     runlog = RunLog(settings, console=console)
 
     if args.image:
-        required_key = {"gemini": "GEMINI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}.get(
-            args.provider
-        )
-        have_key = {
-            "gemini": settings.gemini_api_key,
-            "anthropic": settings.anthropic_api_key,
-        }.get(args.provider)
+        required_key = {"gemini": "GEMINI_API_KEY"}.get(args.provider)
+        have_key = {"gemini": settings.gemini_api_key}.get(args.provider)
         if required_key and not have_key:
             console.print(
                 f"[yellow]No {required_key} found.[/] Copy .env.example to .env and add a key."

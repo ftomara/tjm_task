@@ -1,8 +1,7 @@
 """Extraction instructions, shared by every vision provider.
 
-Deliberately provider-agnostic. Both the Gemini and Anthropic extractors send
-exactly these words, so switching providers changes the model but not the task
-- which is what makes comparing their output meaningful.
+Deliberately provider-agnostic, so adding another extractor changes the model
+but not the task.
 """
 
 from __future__ import annotations

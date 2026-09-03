@@ -16,7 +16,7 @@ from .fixture import FixtureExtractor, save
 from .validate import TOLERANCE, ValidationReport, validate
 
 #: Selectable via ``--provider``. ``gemini`` is the default.
-PROVIDERS = ("gemini", "anthropic", "fixture")
+PROVIDERS = ("gemini", "fixture")
 
 
 def build_extractor(name: str, settings: Settings, fixture_path: Path) -> OrderExtractor:
@@ -29,10 +29,6 @@ def build_extractor(name: str, settings: Settings, fixture_path: Path) -> OrderE
         from .gemini_vision import GeminiVisionExtractor
 
         return GeminiVisionExtractor(settings)
-    if name == "anthropic":
-        from .anthropic_vision import AnthropicVisionExtractor
-
-        return AnthropicVisionExtractor(settings)
     if name == "fixture":
         return FixtureExtractor(fixture_path)
     raise ValueError(f"unknown extraction provider {name!r}; expected one of {PROVIDERS}")

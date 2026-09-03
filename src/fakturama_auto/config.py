@@ -17,8 +17,6 @@ DEFAULT_ORDER_IMAGE = PROJECT_ROOT / "assets" / "order_input.png"
 #: A trusted extraction, committed so the UI flow can be replayed offline.
 DEFAULT_FIXTURE = PROJECT_ROOT / "assets" / "extraction.fixture.json"
 
-#: Anthropic's vision pipeline resizes anything longer than this on its long
-#: edge, so upscaling past it buys nothing.
 MAX_IMAGE_LONG_EDGE = 1568
 
 
@@ -26,7 +24,6 @@ MAX_IMAGE_LONG_EDGE = 1568
 class Settings:
     gemini_api_key: str | None
     gemini_model: str
-    anthropic_api_key: str | None
     model: str
     fakturama_exe: Path | None
     artifacts_dir: Path
@@ -50,7 +47,6 @@ def load_settings(run_id: str | None = None) -> Settings:
     return Settings(
         gemini_api_key=os.environ.get("GEMINI_API_KEY"),
         gemini_model=os.environ.get("GEMINI_MODEL", "gemini-3.7-flash"),
-        anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"),
         model=os.environ.get("FAKTURAMA_AUTO_MODEL", "claude-opus-5"),
         fakturama_exe=Path(exe) if exe else None,
         artifacts_dir=PROJECT_ROOT / "artifacts",

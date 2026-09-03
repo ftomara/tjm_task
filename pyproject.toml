@@ -9,7 +9,6 @@ description = "Image-to-cash automation for Fakturama: order image -> saved Orde
 requires-python = ">=3.10"
 dependencies = [
     "google-genai>=1.0.0",
-    "anthropic>=0.40.0",
     "pillow>=10.0.0",
     "pydantic>=2.6.0",
     "pywinauto>=0.6.8",
