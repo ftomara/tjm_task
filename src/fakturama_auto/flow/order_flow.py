@@ -45,6 +45,7 @@ from decimal import Decimal
 from typing import Iterator
 
 from ..app.contact_editor import ContactEditor, open_new_debtor
+from ..app.documents_view import open_documents
 from ..app.order_editor import OrderEditor, open_new_order
 from ..app.payment_term_editor import create_payment_method
 from ..app.product_editor import create_product
@@ -205,6 +206,10 @@ def run_order_flow(
         invoice_editor.save()
         invoice_number = _read_invoice_number(session)
         invoice_paid = invoice_editor.is_paid()
+
+    with _step(runlog, "Close all tabs and highlight the saved documents"):
+        session.close_all_tabs()
+        open_documents(session).highlight_last(2)
 
     return FlowResult(
         order_number=order_number,

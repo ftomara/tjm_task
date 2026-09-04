@@ -199,6 +199,26 @@ class FakturamaSession:
             description=f"dialog matching {title_re!r} to close",
         )
 
+    def close_all_tabs(self) -> None:
+        """Close every open editor tab via Ctrl+Shift+W (File > Close All's own shortcut).
+
+        Confirmed live: plain Ctrl+W does nothing on this app - no exception,
+        no tab closes, even sent several times in a row - this Eclipse build
+        evidently doesn't route it anywhere. The menu itself confirms the
+        real binding: its "Close All" item's own accessible name is literally
+        "Close All\tCtrl+Shift+W". Sending that combo directly closes every
+        editor tab (Order, Debtor, Product, VAT, Shipping, Invoice, and their
+        own sub-tabs) in one shot with no "Save changes?" prompt, since
+        everything on this path has already been saved by the time this is
+        called - clicking through the File menu to reach the same command
+        was tried first and is worse: it is one more place a stray click can
+        land on the wrong item while the menu is transiently open. The
+        dashboard/list tabs (Documents, Debtors, Products, VATs, Shippings,
+        terms of payment) are left untouched either way - confirmed live.
+        """
+        window = self.focus()
+        window.type_keys("^+w")
+
     def activate_tab(self, content_pane_name: str, timeout: float = 15.0) -> Any:
         """Bring a previously-opened editor tab to the front and return its content.
 
