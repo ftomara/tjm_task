@@ -2,7 +2,7 @@
 
 Turns a photographed/rendered sales order into a saved, linked, paid **Order → Invoice** pair inside [Fakturama](https://www.fakturama.info/) (an Eclipse RCP / SWT desktop accounting app), driven entirely through Windows UI Automation — no hardcoded screen coordinates anywhere on the path.
 
-**Demo:** [demo.mp4](https://drive.google.com/file/d/1MZW8toXVQ-JoqdYCHUqcD3YkswINFEvZ/view?usp=drive_link) — a full recorded run against a wiped workspace.
+**Demo:** [demo.mp4](https://drive.google.com/file/d/1pVpQW_Dwkw9GuVjmo-yDbMf6Yyizo3JR/view?usp=sharing) — a full recorded run against a wiped workspace.
 ## What it does
 
 1. **Reads the order image** with a vision LLM (Gemini) and validates the result arithmetically — every line's `qty × price × (1 − discount%)` and the printed net/VAT/gross totals all have to agree with each other before anything gets typed into the UI.
@@ -31,7 +31,19 @@ GEMINI_API_KEY=...
 
 ## Usage
 
-The console script is `fakturama-auto` (installed by `pip install -e .`; use `.venv\Scripts\fakturama-auto.exe` if you haven't activated the venv).
+The console script is `fakturama-auto` (installed by `pip install -e .`).
+
+> **Every command below assumes the venv from Setup is activated in this terminal.** If you open a fresh terminal and just run `fakturama-auto ...` without activating first, PowerShell will say `The term 'fakturama-auto' is not recognized...` - it isn't on `PATH` until you either:
+>
+> ```powershell
+> .venv\Scripts\activate
+> ```
+>
+> or skip activation and call the exe directly every time:
+>
+> ```powershell
+> .venv\Scripts\fakturama-auto.exe run --image assets\test_orders\image.png --launch
+> ```
 
 **Run the whole flow, extracting live from an image:**
 
