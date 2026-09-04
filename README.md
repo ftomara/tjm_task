@@ -108,4 +108,23 @@ pytest
 - Track down the exact Country-combobox mismatch a later manual run surfaced (an extracted country string not matching Fakturama's dropdown value exactly) - the same class of "value looks right, doesn't match the widget's actual option list" issue already fixed for a couple of other combos, just not yet chased down for this one.
 - Run all five synthetic test images (different currency, payment method, and VAT-rate combinations) through to a fully verified finish, not just the original.
 - Replace the coordinate-offset row clicks on the two opaque grids with the OCR-based rung the design doc describes as the fallback for a genuinely blind UIA tree, so nothing in the flow depends on a fixed row height holding across Fakturama versions.
+    - Longer-term, upstream a fix for the opaque NatTable/grid accessibility gap into pywinauto (or SWT's own accessibility bridge) instead of working around it locally - turns a one-off hardcoded-offset hack into a real fix any future SWT automation project could reuse instead of re-solving the same blind-grid problem.
 - Add a real integration-style smoke test that launches Fakturama in CI-like conditions (or a recorded-session replay) rather than relying entirely on fake-object unit tests plus manual runs for the UI-driving code.
+- Turn this into a standing service instead of a one-shot CLI run: a watched input folder plus a filesystem listener that picks up each new order image and queues it through the automation automatically. Worth doing properly once more than one worker instance can run concurrently - needs the same handling any queue-consumer needs (a claim/lock step per job, e.g. a DB row lock or an atomic move out of the watched folder) so two workers can't grab and double-process the same image.
+
+    ```mermaid
+    flowchart LR
+        FOLDER["Input invoices\nfolder"]
+        OBSERVER["Folder-changes\nobserver"]
+        QUEUE[["images Q"]]
+        AUTO["Fakturama\nImage-to-Cash\nAutomation"]
+
+        OBSERVER -->|"observe folder changes\nfor newly added images"| FOLDER
+        OBSERVER -->|"queue images for\nextraction and adding\nto fakturama"| QUEUE
+        QUEUE --> AUTO
+
+        style OBSERVER fill:#123a2e,stroke:#2f9e6f,color:#c9f2df
+        style QUEUE fill:#1c2541,stroke:#5b7fff,color:#c9d6f2
+    ```
+
+- Port the `uia/` grounding layer to Mac/Linux accessibility APIs (AXUIElement / AT-SPI) so the automation isn't Windows-only. The extraction and orchestration layers already carry over unchanged thanks to the layering in §7 - it's specifically `uia/` and every locator in `app/` that would need rebuilding and re-grounding against a different accessibility tree.
